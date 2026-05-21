@@ -1,0 +1,11 @@
+package secure-log:store-sqlite@0.1.0;
+
+// A secure-log persistence backend backed by the sqlite:wasm
+// component. Imports the SQLite high-level API and exports the
+// secure-log store contract. Compose with `wac plug`:
+//
+//   sqlite.wasm  --(high-level)-->  store-sqlite  --(store)-->  core
+world store-sqlite {
+    import sqlite:wasm/high-level@0.1.0;
+    export secure-log:log/store@0.1.0;
+}

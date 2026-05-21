@@ -1,0 +1,12 @@
+package secure-log:store-file@0.1.0;
+
+// A secure-log persistence backend backed by an append-only file on
+// the WASI filesystem. Each mutation is appended as a JSON line; the
+// queryable state is rebuilt in memory on open. Exports the
+// secure-log store contract; compose with `wac plug` into the core.
+//
+// The file path comes from the SECURE_LOG_FILE environment variable
+// (default: "secure-log.jsonl").
+world store-file {
+    export secure-log:log/store@0.1.0;
+}

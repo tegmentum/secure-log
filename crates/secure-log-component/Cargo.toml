@@ -1,0 +1,20 @@
+[package]
+name = "secure-log-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Secure-log core as a WASI Preview 2 component: imports secure-log:store, exports secure-log:log + encoder."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+secure-log = { workspace = true }
+anyhow = "1"
+
+[package.metadata.component]
+package = "secure-log:log"
+target = { path = "../../wit", world = "secure-log-core" }

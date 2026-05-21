@@ -1,0 +1,25 @@
+[package]
+name = "secure-log-store-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "secure-log:store provider backed by the sqlite:wasm component (WASI Preview 2)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "secure-log:store-sqlite"
+
+[package.metadata.component.target]
+path = "wit"
+world = "store-sqlite"
+
+[package.metadata.component.target.dependencies]
+"secure-log:log" = { path = "../../wit" }
+"sqlite:wasm" = { path = "../../../sqlite-wasm/wit" }

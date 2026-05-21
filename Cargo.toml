@@ -3,6 +3,24 @@ resolver = "2"
 members = [
     "crates/secure-log",
     "crates/secure-log-sqlite",
+    "crates/secure-log-component",
+    "crates/secure-log-store-sqlite",
+    "crates/secure-log-store-file",
+    "crates/secure-log-store-remote",
+]
+exclude = [
+    # Native host-side verification harness (uses the wasmtime crate);
+    # not part of the component build.
+    "verify",
+]
+# Native crates build with plain `cargo build` / `cargo test`. The
+# wasm component crates target wasm32-wasip2 and are built with
+# `cargo component build --target wasm32-wasip2 -p <name>` (see
+# scripts/build-components.sh), so they are excluded from the default
+# set to keep host builds working.
+default-members = [
+    "crates/secure-log",
+    "crates/secure-log-sqlite",
 ]
 
 [workspace.package]
@@ -30,6 +48,12 @@ rand = { version = "0.8", default-features = false, features = ["getrandom"] }
 
 # SQLite backend
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Component model
+wit-bindgen = "0.44"
+
+# Internal
+secure-log = { path = "crates/secure-log" }
 
 # Test-only
 tempfile = "3"

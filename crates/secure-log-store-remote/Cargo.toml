@@ -1,0 +1,26 @@
+[package]
+name = "secure-log-store-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "secure-log:store provider that forwards to a remote machine over wasi:http (WASI Preview 2)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[package.metadata.component]
+package = "secure-log:store-remote"
+
+[package.metadata.component.target]
+path = "wit"
+world = "store-remote"
+
+[package.metadata.component.target.dependencies]
+"secure-log:log" = { path = "../../wit" }

@@ -1,0 +1,11 @@
+package secure-log:store-remote@0.1.0;
+
+// A secure-log persistence backend that forwards every operation to a
+// remote machine as a JSON-RPC call over the pluggable `transport`
+// interface. Exports the store contract; imports `transport`. Compose
+// with `wac plug` into the core, and supply a transport provider
+// (wasi:http-backed, host function, etc.) for the import.
+world store-remote {
+    import secure-log:log/transport@0.1.0;
+    export secure-log:log/store@0.1.0;
+}

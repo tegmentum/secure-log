@@ -6,12 +6,98 @@ and optional AEAD payload sealing.
 
 ## Crates
 
+Native (build with `cargo build` / `cargo test`):
+
 - **`secure-log`**: core types, `SecureLog` trait, `NativeSecureLog`
   implementation, canonical CBOR encoder, hash chain, Merkle tree,
-  inclusion proofs, witness submission format, payload AEAD.
+  inclusion proofs, witness submission format, payload AEAD, the
+  `SecureLogStore` persistence trait, and the `CheckpointSigner`
+  abstraction.
 - **`secure-log-sqlite`**: `SqliteSecureLogStore` — SQLite-backed
-  storage that implements the `SecureLogStore` trait. Manages its own
-  migrations.
+  storage (rusqlite) that implements `SecureLogStore`. Manages its
+  own migrations.
+
+WASI Preview 2 components (build with
+`cargo component build --target wasm32-wasip2`):
+
+- **`secure-log-component`**: the core, packaged as a component.
+  Imports `secure-log:log/store`, exports `secure-log:log/{encoder,log}`.
+- **`secure-log-store-sqlite`**: a `secure-log:store` provider backed
+  by the [`sqlite:wasm`](../sqlite-wasm) component.
+- **`secure-log-store-file`**: a `secure-log:store` provider backed by
+  an append-only JSON-lines file on the WASI filesystem.
+- **`secure-log-store-remote`**: a `secure-log:store` provider that
+  forwards each operation as JSON-RPC over a pluggable `transport`
+  interface (network-agnostic).
+
+## Component architecture (pluggable persistence)
+
+```text
+                    secure-log-component (core)
+                    exports secure-log:log/{encoder,log}
+                    imports secure-log:log/store
+                              │
+              ┌───────────────┼────────────────────┐
+              ▼               ▼                     ▼
+       store-sqlite      store-file           store-remote
+       exports store     exports store        exports store
+       imports           (wasi:filesystem)    imports
+       sqlite:wasm                            secure-log:log/transport
+              │
+              ▼
+       sqlite-wasm (build/sqlite.wasm)
+```
+
+Persistence is pluggable at two levels: the `SecureLogStore` Rust
+trait (native), and the `secure-log:log/store` WIT interface
+(components, chosen at composition time via `wac plug`).
+
+### Build & compose
+
+```bash
+# builds all four component crates and composes each backend stack
+./scripts/build-components.sh
+# -> dist/secure-log-sqlite.wasm   (core + store-sqlite + sqlite engine)
+# -> dist/secure-log-file.wasm     (core + store-file)
+# -> dist/secure-log-remote.wasm   (core + store-remote; imports transport)
+```
+
+`secure-log-sqlite.wasm` and `secure-log-file.wasm` import only WASI
+and export `secure-log:log`. `secure-log-remote.wasm` additionally
+imports `secure-log:log/transport`; supply a provider for it before
+running.
+
+### Configuration
+
+- `secure-log-store-sqlite`: `SECURE_LOG_DB` env var selects a file
+  database; unset uses an in-memory database.
+- `secure-log-store-file`: `SECURE_LOG_FILE` env var (default
+  `secure-log.jsonl`) selects the append-only log file.
+
+### Remote transport protocol (proposed default)
+
+The remote backend calls `transport.rpc(method, params-json)` once per
+store operation:
+
+- `method` — the store function name (e.g. `secure-log-insert`).
+- `params-json` — a JSON array of the call's arguments, in order.
+- the returned string — a JSON encoding of the return value, or the
+  call returns `err(message)`.
+
+A `transport` provider can be backed by `wasi:http`, a host function,
+a message queue, etc. — that choice is itself swappable.
+
+### End-to-end verification
+
+`verify/` is a standalone wasmtime host harness (excluded from the
+component workspace) that instantiates a composed component and
+exercises append / read / verify-chain / segment / inclusion-proof:
+
+```bash
+cd verify
+cargo run --release -- ../dist/secure-log-sqlite.wasm
+SECURE_LOG_FILE=secure-log.jsonl cargo run --release -- ../dist/secure-log-file.wasm
+```
 
 ## Architecture
 

@@ -1,0 +1,547 @@
+//! secure-log core, packaged as a WASI Preview 2 component.
+//!
+//! Imports `secure-log:log/store` for persistence and exports
+//! `secure-log:log/{encoder,log}`. All integrity logic (hash chain,
+//! Merkle sealing, inclusion proofs) lives in the `secure-log` core
+//! crate; this component is a thin adapter:
+//!
+//! - [`ImportedStore`] implements the core `SecureLogStore` trait by
+//!   delegating to the imported `store` interface.
+//! - The exported `log` interface delegates to a [`NativeSecureLog`]
+//!   built over `ImportedStore` + `CborEncoder`.
+//! - The exported `encoder` interface delegates to `CborEncoder`.
+
+#[allow(warnings)]
+mod bindings;
+
+use std::cell::RefCell;
+
+use secure_log::{
+    CanonicalEncoder, CborEncoder, NativeSecureLog, SecureLog, SecureLogStore, HASH_LEN,
+};
+
+use bindings::exports::secure_log::log::encoder::{
+    self, CheckpointFields as WCheckpointFields, EntryFields as WEntryFields,
+};
+use bindings::exports::secure_log::log::log::{
+    self, AppendResult as WAppendResult, InclusionProof as WInclusionProof, ProofStep as WProofStep,
+    SegmentInfo as WSegmentInfo,
+};
+use bindings::secure_log::log::store as wstore;
+
+struct Component;
+
+// ---------------------------------------------------------------------
+// Per-instance NativeSecureLog. wasip2 is single-threaded, so a
+// thread-local is a safe singleton with one session id per component
+// instance.
+// ---------------------------------------------------------------------
+
+thread_local! {
+    static LOG: RefCell<Option<NativeSecureLog>> = const { RefCell::new(None) };
+}
+
+fn with_log<R>(f: impl FnOnce(&NativeSecureLog) -> R) -> R {
+    LOG.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            let store: Box<dyn SecureLogStore> = Box::new(ImportedStore);
+            let encoder: Box<dyn CanonicalEncoder> = Box::new(CborEncoder::new());
+            *opt = Some(NativeSecureLog::new(store, encoder));
+        }
+        f(opt.as_ref().expect("initialized above"))
+    })
+}
+
+// ---------------------------------------------------------------------
+// Hash conversions.
+// ---------------------------------------------------------------------
+
+fn digest_from_vec(v: Vec<u8>) -> Result<[u8; HASH_LEN], String> {
+    v.try_into()
+        .map_err(|_| "hash is not 32 bytes".to_string())
+}
+
+// ---------------------------------------------------------------------
+// Store-row conversions (imported `store` records <-> core rows).
+// ---------------------------------------------------------------------
+
+fn row_to_w(r: &secure_log::SecureLogRow) -> wstore::SecureLogRow {
+    wstore::SecureLogRow {
+        seqno: r.seqno,
+        stream_id: r.stream_id.clone(),
+        session_id: r.session_id.clone(),
+        boot_id: r.boot_id.clone(),
+        timestamp_rfc3339: r.timestamp_rfc3339.clone(),
+        event_type: r.event_type.clone(),
+        severity: r.severity.clone(),
+        producer: r.producer.clone(),
+        payload_encoding: r.payload_encoding.clone(),
+        payload: r.payload.clone(),
+        prev_entry_hash: r.prev_entry_hash.clone(),
+        entry_hash: r.entry_hash.clone(),
+    }
+}
+
+fn row_from_w(r: wstore::SecureLogRow) -> secure_log::SecureLogRow {
+    secure_log::SecureLogRow {
+        seqno: r.seqno,
+        stream_id: r.stream_id,
+        session_id: r.session_id,
+        boot_id: r.boot_id,
+        timestamp_rfc3339: r.timestamp_rfc3339,
+        event_type: r.event_type,
+        severity: r.severity,
+        producer: r.producer,
+        payload_encoding: r.payload_encoding,
+        payload: r.payload,
+        prev_entry_hash: r.prev_entry_hash,
+        entry_hash: r.entry_hash,
+    }
+}
+
+fn seg_to_w(r: &secure_log::SecureLogSegmentRow) -> wstore::SecureLogSegmentRow {
+    wstore::SecureLogSegmentRow {
+        segment_id: r.segment_id,
+        stream_id: r.stream_id.clone(),
+        seq_start: r.seq_start,
+        seq_end: r.seq_end,
+        merkle_root: r.merkle_root.clone(),
+        last_entry_hash: r.last_entry_hash.clone(),
+        prev_checkpoint_hash: r.prev_checkpoint_hash.clone(),
+        closed_at_rfc3339: r.closed_at_rfc3339.clone(),
+        signature: r.signature.clone(),
+        signer_identity: r.signer_identity.clone(),
+    }
+}
+
+fn seg_from_w(r: wstore::SecureLogSegmentRow) -> secure_log::SecureLogSegmentRow {
+    secure_log::SecureLogSegmentRow {
+        segment_id: r.segment_id,
+        stream_id: r.stream_id,
+        seq_start: r.seq_start,
+        seq_end: r.seq_end,
+        merkle_root: r.merkle_root,
+        last_entry_hash: r.last_entry_hash,
+        prev_checkpoint_hash: r.prev_checkpoint_hash,
+        closed_at_rfc3339: r.closed_at_rfc3339,
+        signature: r.signature,
+        signer_identity: r.signer_identity,
+    }
+}
+
+fn stream_to_w(r: &secure_log::SecureLogStreamRow) -> wstore::SecureLogStreamRow {
+    wstore::SecureLogStreamRow {
+        name: r.name.clone(),
+        tier: r.tier.clone(),
+        description: r.description.clone(),
+        created_at_rfc3339: r.created_at_rfc3339.clone(),
+        deprecated_at_rfc3339: r.deprecated_at_rfc3339.clone(),
+    }
+}
+
+fn stream_from_w(r: wstore::SecureLogStreamRow) -> secure_log::SecureLogStreamRow {
+    secure_log::SecureLogStreamRow {
+        name: r.name,
+        tier: r.tier,
+        description: r.description,
+        created_at_rfc3339: r.created_at_rfc3339,
+        deprecated_at_rfc3339: r.deprecated_at_rfc3339,
+    }
+}
+
+fn witness_to_w(r: &secure_log::WitnessLogRow) -> wstore::WitnessLogRow {
+    wstore::WitnessLogRow {
+        id: r.id,
+        stream_id: r.stream_id.clone(),
+        segment_id: r.segment_id,
+        seq_start: r.seq_start,
+        seq_end: r.seq_end,
+        checkpoint_hash_hex: r.checkpoint_hash_hex.clone(),
+        signature_hex: r.signature_hex.clone(),
+        signer_identity: r.signer_identity.clone(),
+        received_at_rfc3339: r.received_at_rfc3339.clone(),
+    }
+}
+
+fn witness_from_w(r: wstore::WitnessLogRow) -> secure_log::WitnessLogRow {
+    secure_log::WitnessLogRow {
+        id: r.id,
+        stream_id: r.stream_id,
+        segment_id: r.segment_id,
+        seq_start: r.seq_start,
+        seq_end: r.seq_end,
+        checkpoint_hash_hex: r.checkpoint_hash_hex,
+        signature_hex: r.signature_hex,
+        signer_identity: r.signer_identity,
+        received_at_rfc3339: r.received_at_rfc3339,
+    }
+}
+
+// ---------------------------------------------------------------------
+// ImportedStore: SecureLogStore over the imported `store` interface.
+// ---------------------------------------------------------------------
+
+struct ImportedStore;
+
+fn ae(e: String) -> anyhow::Error {
+    anyhow::anyhow!(e)
+}
+
+impl SecureLogStore for ImportedStore {
+    fn secure_log_insert(&self, row: &secure_log::SecureLogRow) -> anyhow::Result<u64> {
+        wstore::secure_log_insert(&row_to_w(row)).map_err(ae)
+    }
+
+    fn secure_log_global_head(&self) -> anyhow::Result<Option<u64>> {
+        wstore::secure_log_global_head().map_err(ae)
+    }
+
+    fn secure_log_get(&self, seqno: u64) -> anyhow::Result<Option<secure_log::SecureLogRow>> {
+        Ok(wstore::secure_log_get(seqno).map_err(ae)?.map(row_from_w))
+    }
+
+    fn secure_log_range(
+        &self,
+        stream_id: &str,
+        from: u64,
+        to: u64,
+    ) -> anyhow::Result<Vec<secure_log::SecureLogRow>> {
+        Ok(wstore::secure_log_range(stream_id, from, to)
+            .map_err(ae)?
+            .into_iter()
+            .map(row_from_w)
+            .collect())
+    }
+
+    fn secure_log_head(&self, stream_id: &str) -> anyhow::Result<Option<u64>> {
+        wstore::secure_log_head(stream_id).map_err(ae)
+    }
+
+    fn secure_log_last(
+        &self,
+        stream_id: &str,
+    ) -> anyhow::Result<Option<secure_log::SecureLogRow>> {
+        Ok(wstore::secure_log_last(stream_id).map_err(ae)?.map(row_from_w))
+    }
+
+    fn secure_log_segment_insert(
+        &self,
+        row: &secure_log::SecureLogSegmentRow,
+        entries: &[(u64, u64)],
+    ) -> anyhow::Result<u64> {
+        wstore::secure_log_segment_insert(&seg_to_w(row), entries).map_err(ae)
+    }
+
+    fn secure_log_segment_get(
+        &self,
+        segment_id: u64,
+    ) -> anyhow::Result<Option<secure_log::SecureLogSegmentRow>> {
+        Ok(wstore::secure_log_segment_get(segment_id)
+            .map_err(ae)?
+            .map(seg_from_w))
+    }
+
+    fn secure_log_segments_list(
+        &self,
+        stream_id: &str,
+    ) -> anyhow::Result<Vec<secure_log::SecureLogSegmentRow>> {
+        Ok(wstore::secure_log_segments_list(stream_id)
+            .map_err(ae)?
+            .into_iter()
+            .map(seg_from_w)
+            .collect())
+    }
+
+    fn secure_log_segment_last_seqno(&self, stream_id: &str) -> anyhow::Result<Option<u64>> {
+        wstore::secure_log_segment_last_seqno(stream_id).map_err(ae)
+    }
+
+    fn secure_log_segment_entry_seqnos(&self, segment_id: u64) -> anyhow::Result<Vec<u64>> {
+        wstore::secure_log_segment_entry_seqnos(segment_id).map_err(ae)
+    }
+
+    fn secure_log_segment_for_seqno(&self, seqno: u64) -> anyhow::Result<Option<u64>> {
+        wstore::secure_log_segment_for_seqno(seqno).map_err(ae)
+    }
+
+    fn secure_log_segment_set_signature(
+        &self,
+        segment_id: u64,
+        signature: &[u8],
+        signer_identity: &str,
+    ) -> anyhow::Result<()> {
+        wstore::secure_log_segment_set_signature(segment_id, signature, signer_identity)
+            .map_err(ae)
+    }
+
+    fn witness_log_insert(&self, row: &secure_log::WitnessLogRow) -> anyhow::Result<u64> {
+        wstore::witness_log_insert(&witness_to_w(row)).map_err(ae)
+    }
+
+    fn witness_log_latest(
+        &self,
+        stream_id: &str,
+    ) -> anyhow::Result<Option<secure_log::WitnessLogRow>> {
+        Ok(wstore::witness_log_latest(stream_id)
+            .map_err(ae)?
+            .map(witness_from_w))
+    }
+
+    fn witness_log_list(
+        &self,
+        stream_id: &str,
+    ) -> anyhow::Result<Vec<secure_log::WitnessLogRow>> {
+        Ok(wstore::witness_log_list(stream_id)
+            .map_err(ae)?
+            .into_iter()
+            .map(witness_from_w)
+            .collect())
+    }
+
+    fn witness_log_stream_ids(&self) -> anyhow::Result<Vec<String>> {
+        wstore::witness_log_stream_ids().map_err(ae)
+    }
+
+    fn witness_log_gc(
+        &self,
+        stream_id: Option<&str>,
+        keep_latest: Option<usize>,
+        older_than_rfc3339: Option<&str>,
+    ) -> anyhow::Result<usize> {
+        let n = wstore::witness_log_gc(
+            stream_id,
+            keep_latest.map(|k| k as u32),
+            older_than_rfc3339,
+        )
+        .map_err(ae)?;
+        Ok(n as usize)
+    }
+
+    fn secure_log_stream_upsert(&self, row: &secure_log::SecureLogStreamRow) -> anyhow::Result<()> {
+        wstore::secure_log_stream_upsert(&stream_to_w(row)).map_err(ae)
+    }
+
+    fn secure_log_stream_get(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<secure_log::SecureLogStreamRow>> {
+        Ok(wstore::secure_log_stream_get(name)
+            .map_err(ae)?
+            .map(stream_from_w))
+    }
+
+    fn secure_log_stream_list(&self) -> anyhow::Result<Vec<secure_log::SecureLogStreamRow>> {
+        Ok(wstore::secure_log_stream_list()
+            .map_err(ae)?
+            .into_iter()
+            .map(stream_from_w)
+            .collect())
+    }
+
+    fn secure_log_stream_set_tier(&self, name: &str, tier: &str) -> anyhow::Result<()> {
+        wstore::secure_log_stream_set_tier(name, tier).map_err(ae)
+    }
+
+    fn secure_log_stream_deprecate(
+        &self,
+        name: &str,
+        deprecated_at_rfc3339: &str,
+    ) -> anyhow::Result<()> {
+        wstore::secure_log_stream_deprecate(name, deprecated_at_rfc3339).map_err(ae)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Export-record conversions (core types -> exported WIT records).
+// ---------------------------------------------------------------------
+
+fn entry_to_w(f: secure_log::EntryFields) -> WEntryFields {
+    WEntryFields {
+        version: f.version,
+        stream_id: f.stream_id,
+        session_id: f.session_id,
+        boot_id: f.boot_id,
+        seqno: f.seqno,
+        timestamp_rfc3339: f.timestamp_rfc3339,
+        event_type: f.event_type,
+        severity: f.severity,
+        producer: f.producer,
+        payload_encoding: f.payload_encoding,
+        payload: f.payload,
+        prev_entry_hash: f.prev_entry_hash,
+    }
+}
+
+fn entry_from_w(f: WEntryFields) -> secure_log::EntryFields {
+    secure_log::EntryFields {
+        version: f.version,
+        stream_id: f.stream_id,
+        session_id: f.session_id,
+        boot_id: f.boot_id,
+        seqno: f.seqno,
+        timestamp_rfc3339: f.timestamp_rfc3339,
+        event_type: f.event_type,
+        severity: f.severity,
+        producer: f.producer,
+        payload_encoding: f.payload_encoding,
+        payload: f.payload,
+        prev_entry_hash: f.prev_entry_hash,
+    }
+}
+
+fn checkpoint_from_w(f: WCheckpointFields) -> secure_log::CheckpointFields {
+    secure_log::CheckpointFields {
+        version: f.version,
+        stream_id: f.stream_id,
+        segment_id: f.segment_id,
+        seq_start: f.seq_start,
+        seq_end: f.seq_end,
+        merkle_root: f.merkle_root,
+        last_entry_hash: f.last_entry_hash,
+        prev_checkpoint_hash: f.prev_checkpoint_hash,
+        boot_id: f.boot_id,
+        session_id: f.session_id,
+        policy_hash: f.policy_hash,
+        timestamp_rfc3339: f.timestamp_rfc3339,
+    }
+}
+
+fn segment_info_to_w(s: secure_log::SegmentInfo) -> WSegmentInfo {
+    WSegmentInfo {
+        segment_id: s.segment_id,
+        stream_id: s.stream_id,
+        seq_start: s.seq_start,
+        seq_end: s.seq_end,
+        merkle_root: s.merkle_root.to_vec(),
+        last_entry_hash: s.last_entry_hash.to_vec(),
+        prev_checkpoint_hash: s.prev_checkpoint_hash.to_vec(),
+        closed_at_rfc3339: s.closed_at_rfc3339,
+        signature: if s.signature.is_empty() {
+            None
+        } else {
+            Some(s.signature)
+        },
+        signer_identity: s.signer_identity,
+    }
+}
+
+fn proof_to_w(p: secure_log::InclusionProof) -> WInclusionProof {
+    WInclusionProof {
+        seqno: p.seqno,
+        entry_hash: p.entry_hash.to_vec(),
+        segment_id: p.segment_id,
+        merkle_root: p.merkle_root.to_vec(),
+        path: p
+            .path
+            .into_iter()
+            .map(|step| WProofStep {
+                sibling_hash: step.sibling_hash.to_vec(),
+                right: step.right,
+            })
+            .collect(),
+    }
+}
+
+fn proof_from_w(p: WInclusionProof) -> Result<secure_log::InclusionProof, String> {
+    let mut path = Vec::with_capacity(p.path.len());
+    for step in p.path {
+        path.push(secure_log::ProofStep {
+            sibling_hash: digest_from_vec(step.sibling_hash)?,
+            right: step.right,
+        });
+    }
+    Ok(secure_log::InclusionProof {
+        seqno: p.seqno,
+        entry_hash: digest_from_vec(p.entry_hash)?,
+        segment_id: p.segment_id,
+        merkle_root: digest_from_vec(p.merkle_root)?,
+        path,
+    })
+}
+
+// ---------------------------------------------------------------------
+// Exported `encoder` interface.
+// ---------------------------------------------------------------------
+
+impl encoder::Guest for Component {
+    fn encode_entry(fields: WEntryFields) -> Vec<u8> {
+        CborEncoder::new().encode_entry(&entry_from_w(fields))
+    }
+
+    fn encode_checkpoint(fields: WCheckpointFields) -> Vec<u8> {
+        CborEncoder::new().encode_checkpoint(&checkpoint_from_w(fields))
+    }
+
+    fn name() -> String {
+        CborEncoder::new().name().to_string()
+    }
+}
+
+// ---------------------------------------------------------------------
+// Exported `log` interface.
+// ---------------------------------------------------------------------
+
+impl log::Guest for Component {
+    fn append(
+        stream_id: String,
+        event_type: String,
+        severity: String,
+        producer: String,
+        payload: Vec<u8>,
+    ) -> Result<WAppendResult, String> {
+        with_log(|log| log.append(&stream_id, &event_type, &severity, &producer, &payload))
+            .map(|r| WAppendResult {
+                seqno: r.seqno,
+                entry_hash: r.entry_hash.to_vec(),
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    fn read(seqno: u64) -> Result<WEntryFields, String> {
+        with_log(|log| log.read(seqno))
+            .map(entry_to_w)
+            .map_err(|e| e.to_string())
+    }
+
+    fn head(stream_id: String) -> Result<Option<u64>, String> {
+        with_log(|log| log.head(&stream_id)).map_err(|e| e.to_string())
+    }
+
+    fn verify_chain(stream_id: String, from_seqno: u64, to_seqno: u64) -> Result<(), String> {
+        with_log(|log| log.verify_chain(&stream_id, from_seqno, to_seqno))
+            .map_err(|e| e.to_string())
+    }
+
+    fn close_segment(stream_id: String) -> Result<WSegmentInfo, String> {
+        with_log(|log| log.close_segment(&stream_id))
+            .map(segment_info_to_w)
+            .map_err(|e| e.to_string())
+    }
+
+    fn list_segments(stream_id: String) -> Vec<WSegmentInfo> {
+        with_log(|log| log.list_segments(&stream_id))
+            .map(|v| v.into_iter().map(segment_info_to_w).collect())
+            .unwrap_or_default()
+    }
+
+    fn read_segment(segment_id: u64) -> Result<WSegmentInfo, String> {
+        with_log(|log| log.read_segment(segment_id))
+            .map(segment_info_to_w)
+            .map_err(|e| e.to_string())
+    }
+
+    fn build_inclusion_proof(seqno: u64) -> Result<WInclusionProof, String> {
+        with_log(|log| log.inclusion_proof(seqno))
+            .map(proof_to_w)
+            .map_err(|e| e.to_string())
+    }
+
+    fn verify_inclusion_proof(proof: WInclusionProof, expected_root: Vec<u8>) -> Result<(), String> {
+        let core_proof = proof_from_w(proof)?;
+        let root = digest_from_vec(expected_root)?;
+        secure_log::verify_inclusion_proof(&core_proof, &root).map_err(|e| e.to_string())
+    }
+}
+
+bindings::export!(Component with_types_in bindings);

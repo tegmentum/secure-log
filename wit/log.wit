@@ -140,9 +140,9 @@ interface log {
     // verify every link. Returns ok(_) if the chain is intact, err(_)
     // with a diagnostic if any link is broken.
     verify-chain: func(
-        stream-id: string,
-        from:      u64,
-        to:        u64,
+        stream-id:  string,
+        from-seqno: u64,
+        to-seqno:   u64,
     ) -> result<_, string>;
 
     // Close the current open segment for the given stream, building
@@ -156,7 +156,7 @@ interface log {
     read-segment: func(segment-id: u64) -> result<segment-info, string>;
 
     // Build an inclusion proof for a seqno in its segment's Merkle tree.
-    inclusion-proof: func(seqno: u64) -> result<inclusion-proof, string>;
+    build-inclusion-proof: func(seqno: u64) -> result<inclusion-proof, string>;
 
     // Verify a standalone inclusion proof against an expected root.
     verify-inclusion-proof: func(

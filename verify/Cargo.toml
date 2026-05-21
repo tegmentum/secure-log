@@ -1,0 +1,14 @@
+[package]
+name = "secure-log-verify"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone host harness: instantiates a composed secure-log
+# component under wasmtime and exercises the exported secure-log:log
+# interface end-to-end. Excluded from the component workspace.
+
+[dependencies]
+wasmtime = "44"
+wasmtime-wasi = "44"
+anyhow = "1"
