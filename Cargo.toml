@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/secure-log",
+    "crates/secure-log-sqlite",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/zacharywhitley/secure-log"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+
+# Cryptographic primitives. sha2 + ciborium are frozen for the WIT
+# contract; changing them is a hash-format break.
+sha2 = "0.10"
+ciborium = "0.2"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "getrandom"] }
+hkdf = "0.12"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+rand = { version = "0.8", default-features = false, features = ["getrandom"] }
+
+# SQLite backend
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Test-only
+tempfile = "3"

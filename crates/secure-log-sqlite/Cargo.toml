@@ -1,0 +1,17 @@
+[package]
+name = "secure-log-sqlite"
+description = "SQLite-backed storage for the secure-log tamper-evident audit log."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+secure-log = { path = "../secure-log" }
+rusqlite.workspace = true
+thiserror.workspace = true
+anyhow = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+chrono.workspace = true

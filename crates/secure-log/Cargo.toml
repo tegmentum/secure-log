@@ -1,0 +1,35 @@
+[package]
+name = "secure-log"
+description = "Tamper-evident audit log: hash-chained entries, Merkle-sealed segments, signed checkpoints, witness anti-equivocation, AEAD payload sealing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Enable loading external WASM components that implement
+# wit/log.wit (pluggable encoder).
+wasm-encoder = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+anyhow = "1"
+
+sha2.workspace = true
+ciborium.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+
+wasmtime = { version = "43", optional = true }
+wasmtime-wasi = { version = "43", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
