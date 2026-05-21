@@ -56,7 +56,7 @@ pub enum SignerError {
 /// Returning a stable identifier from `sign_checkpoint` allows the
 /// log to record exactly which key signed a segment without baking a
 /// specific identity model into this crate.
-pub trait CheckpointSigner: Send + Sync {
+pub trait CheckpointSigner {
     /// Sign `message` with the key bound to `identity_name`.
     ///
     /// Returns `(signature, signer_identity)`. The `signer_identity`
