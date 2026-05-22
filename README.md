@@ -79,11 +79,12 @@ operation. There is no implicit default — an empty config is an error.
 | file    | path to the append-only JSON-lines log file |
 | remote  | endpoint locator, forwarded to the transport |
 
-> Note: the `sqlite` backend's ability to persist to a host file
-> depends on the `sqlite:wasm` component's filesystem/VFS and the
-> host's WASI preopens. For guaranteed file persistence today, use the
-> `file` backend (plain `std::fs` over `wasi:filesystem`), which
-> persists across instances through a normal preopened directory.
+> Note: file-backed sqlite requires the `sqlite:wasm` component to
+> select its WASI VFS for file opens (it defaults to an in-memory
+> VFS). This is fixed upstream as of sqlite-wasm commit `19c6ac7`;
+> with that build, a path under a preopened directory produces a real
+> on-disk `SQLite format 3` database that survives reopening. Both the
+> `sqlite` (file) and `file` backends now persist across instances.
 
 ### Remote transport protocol (proposed default)
 
