@@ -483,6 +483,10 @@ impl encoder::Guest for Component {
 // ---------------------------------------------------------------------
 
 impl log::Guest for Component {
+    fn open(config: String) -> Result<(), String> {
+        wstore::init(&config)
+    }
+
     fn append(
         stream_id: String,
         event_type: String,

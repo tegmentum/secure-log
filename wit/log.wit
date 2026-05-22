@@ -83,6 +83,12 @@ interface encoder {
 interface log {
     use encoder.{entry-fields, checkpoint-fields};
 
+    // Open / configure the backing store. MUST be called once before
+    // any other method. `config` is forwarded verbatim to the store
+    // backend (see `store.init` for the per-backend format). There is
+    // no implicit default — an empty config is an error.
+    open: func(config: string) -> result<_, string>;
+
     // Metadata describing a successfully appended entry.
     record append-result {
         seqno:      u64,

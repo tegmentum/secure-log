@@ -60,6 +60,12 @@ fn main() -> Result<()> {
     let bindings = SecureLogHost::instantiate(&mut store, &component, &linker)?;
     let log = bindings.secure_log_log_log();
 
+    // open the backing store explicitly (no implicit default).
+    // Override with arg 2; default to an in-memory sqlite db.
+    let config = std::env::args().nth(2).unwrap_or_else(|| ":memory:".to_string());
+    println!("open store with config: {config:?}");
+    log.call_open(&mut store, &config)?.map_err(anyhow::Error::msg)?;
+
     // append three entries across two streams
     let a = log
         .call_append(&mut store, "default", "user.login", "info", "authd", b"alice")?.map_err(anyhow::Error::msg)?;

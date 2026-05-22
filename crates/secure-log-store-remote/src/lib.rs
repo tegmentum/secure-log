@@ -229,6 +229,13 @@ fn call<P: Serialize, R: DeserializeOwned>(method: &str, params: &P) -> Result<R
 // ---------------------------------------------------------------------
 
 impl Guest for Component {
+    fn init(config: String) -> Result<(), String> {
+        if config.is_empty() {
+            return Err("remote store: init config is empty".into());
+        }
+        call("init", &(config,))
+    }
+
     fn secure_log_insert(row: SecureLogRow) -> Result<u64, String> {
         call("secure-log-insert", &(MRow::from(row),))
     }

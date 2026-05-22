@@ -69,10 +69,21 @@ running.
 
 ### Configuration
 
-- `secure-log-store-sqlite`: `SECURE_LOG_DB` env var selects a file
-  database; unset uses an in-memory database.
-- `secure-log-store-file`: `SECURE_LOG_FILE` env var (default
-  `secure-log.jsonl`) selects the append-only log file.
+The backing store is opened explicitly: call `log.open(config)` (which
+forwards to `store.init(config)`) exactly once before any other
+operation. There is no implicit default — an empty config is an error.
+
+| backend | `config` value |
+| ------- | -------------- |
+| sqlite  | SQLite database path, or `":memory:"` (tests only) |
+| file    | path to the append-only JSON-lines log file |
+| remote  | endpoint locator, forwarded to the transport |
+
+> Note: the `sqlite` backend's ability to persist to a host file
+> depends on the `sqlite:wasm` component's filesystem/VFS and the
+> host's WASI preopens. For guaranteed file persistence today, use the
+> `file` backend (plain `std::fs` over `wasi:filesystem`), which
+> persists across instances through a normal preopened directory.
 
 ### Remote transport protocol (proposed default)
 
@@ -95,8 +106,9 @@ exercises append / read / verify-chain / segment / inclusion-proof:
 
 ```bash
 cd verify
-cargo run --release -- ../dist/secure-log-sqlite.wasm
-SECURE_LOG_FILE=secure-log.jsonl cargo run --release -- ../dist/secure-log-file.wasm
+# args: <composed.wasm> [store-config]
+cargo run --release -- ../dist/secure-log-sqlite.wasm ":memory:"
+cargo run --release -- ../dist/secure-log-file.wasm   "audit.jsonl"
 ```
 
 ## Architecture

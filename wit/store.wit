@@ -71,6 +71,20 @@ interface store {
     // A (seqno, leaf-index) pair recorded when a segment is sealed.
     type segment-entry = tuple<u64, u64>;
 
+    // -- Lifecycle -------------------------------------------------
+
+    // Open / configure the backing store. MUST be called once before
+    // any other method; all other methods return an error until it
+    // succeeds. `config` is a backend-specific locator:
+    //
+    //   sqlite : SQLite database path, or ":memory:" for an ephemeral
+    //            in-memory database (intended for tests only).
+    //   file   : path to the append-only JSON-lines log file.
+    //   remote : endpoint locator passed through to the transport.
+    //
+    // An empty `config` is an error: there is no implicit default.
+    init: func(config: string) -> result<_, string>;
+
     // -- Phase 1: entries -----------------------------------------
 
     secure-log-insert: func(row: secure-log-row) -> result<u64, string>;

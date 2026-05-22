@@ -5,9 +5,10 @@
 //! `secure-log-sqlite` crate; migrations run once per database in a
 //! private `_secure_log_migrations` table.
 //!
-//! Database location: the `SECURE_LOG_DB` environment variable, if
-//! set, is opened as a file; otherwise an in-memory database is used
-//! (data persists for the lifetime of the component instance).
+//! Database location is set explicitly via `store.init(config)`,
+//! which must be called once before any other method:
+//!   - `":memory:"` opens an ephemeral in-memory database (tests).
+//!   - any other non-empty value is treated as a file path.
 
 #[allow(warnings)]
 mod bindings;
@@ -31,23 +32,28 @@ thread_local! {
     static CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
 }
 
-fn with_conn<R>(f: impl FnOnce(&Connection) -> Result<R, String>) -> Result<R, String> {
-    CONN.with(|cell| {
-        let mut opt = cell.borrow_mut();
-        if opt.is_none() {
-            let conn = open_conn()?;
-            migrate(&conn)?;
-            *opt = Some(conn);
-        }
-        f(opt.as_ref().expect("opened above"))
-    })
+fn init_conn(config: &str) -> Result<(), String> {
+    if config.is_empty() {
+        return Err("sqlite store: init config is empty; pass a database path or \":memory:\"".into());
+    }
+    let conn = if config == ":memory:" {
+        sql::open_memory().map_err(dberr)?
+    } else {
+        sql::open_file(config).map_err(dberr)?
+    };
+    migrate(&conn)?;
+    CONN.with(|cell| *cell.borrow_mut() = Some(conn));
+    Ok(())
 }
 
-fn open_conn() -> Result<Connection, String> {
-    match std::env::var("SECURE_LOG_DB") {
-        Ok(path) if !path.is_empty() => sql::open_file(&path).map_err(dberr),
-        _ => sql::open_memory().map_err(dberr),
-    }
+fn with_conn<R>(f: impl FnOnce(&Connection) -> Result<R, String>) -> Result<R, String> {
+    CONN.with(|cell| {
+        let opt = cell.borrow();
+        let conn = opt
+            .as_ref()
+            .ok_or_else(|| "sqlite store not initialized: call init first".to_string())?;
+        f(conn)
+    })
 }
 
 fn dberr(e: sql::DatabaseError) -> String {
@@ -339,6 +345,10 @@ fn one_aggregate(qr: &sql::QueryResult) -> Result<Option<u64>, String> {
 // ---------------------------------------------------------------------
 
 impl Guest for Component {
+    fn init(config: String) -> Result<(), String> {
+        init_conn(&config)
+    }
+
     fn secure_log_insert(row: SecureLogRow) -> Result<u64, String> {
         let seqno = row
             .seqno

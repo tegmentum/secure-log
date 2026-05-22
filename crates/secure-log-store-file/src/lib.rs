@@ -7,8 +7,8 @@
 //! tamper-evident operation log (on top of the secure-log hash
 //! chain that the core component layers over it).
 //!
-//! File path: the `SECURE_LOG_FILE` environment variable, or
-//! "secure-log.jsonl" by default.
+//! File path is set explicitly via `store.init(config)`, which must
+//! be called once before any other method.
 
 #[allow(warnings)]
 mod bindings;
@@ -116,6 +116,7 @@ enum Op {
 
 #[derive(Default)]
 struct Model {
+    path: String,
     entries: Vec<FRow>,
     segments: Vec<FSegment>,
     segment_entries: Vec<(u64, u64, u64)>, // (segment_id, seqno, leaf_index)
@@ -183,14 +184,15 @@ thread_local! {
     static STATE: RefCell<Option<Model>> = const { RefCell::new(None) };
 }
 
-fn path() -> String {
-    std::env::var("SECURE_LOG_FILE").unwrap_or_else(|_| "secure-log.jsonl".to_string())
-}
-
-fn load() -> Result<Model, String> {
-    let p = path();
-    let mut model = Model::default();
-    match std::fs::read_to_string(&p) {
+fn init_store(config: &str) -> Result<(), String> {
+    if config.is_empty() {
+        return Err("file store: init config is empty; pass a log file path".into());
+    }
+    let mut model = Model {
+        path: config.to_string(),
+        ..Model::default()
+    };
+    match std::fs::read_to_string(config) {
         Ok(contents) => {
             for (i, line) in contents.lines().enumerate() {
                 let line = line.trim();
@@ -203,7 +205,7 @@ fn load() -> Result<Model, String> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("read {}: {}", p, e)),
+        Err(e) => return Err(format!("read {}: {}", config, e)),
     }
     // Seed the default stream to match the sqlite backend.
     if !model.streams.iter().any(|s| s.name == "default") {
@@ -214,38 +216,38 @@ fn load() -> Result<Model, String> {
             created_at_rfc3339: String::new(),
             deprecated_at_rfc3339: None,
         };
-        append_op(&Op::StreamUpsert(seed.clone()))?;
+        append_op(&model.path, &Op::StreamUpsert(seed.clone()))?;
         model.apply(&Op::StreamUpsert(seed));
     }
-    Ok(model)
+    STATE.with(|cell| *cell.borrow_mut() = Some(model));
+    Ok(())
 }
 
-fn append_op(op: &Op) -> Result<(), String> {
-    let p = path();
+fn append_op(path: &str, op: &Op) -> Result<(), String> {
     let line = serde_json::to_string(op).map_err(|e| format!("serialize: {}", e))?;
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&p)
-        .map_err(|e| format!("open {}: {}", p, e))?;
-    writeln!(f, "{}", line).map_err(|e| format!("append {}: {}", p, e))?;
+        .open(path)
+        .map_err(|e| format!("open {}: {}", path, e))?;
+    writeln!(f, "{}", line).map_err(|e| format!("append {}: {}", path, e))?;
     Ok(())
 }
 
-/// Run `f` against the in-memory model, lazily loading it first.
+/// Run `f` against the in-memory model. Errors if `init` has not run.
 fn with_model<R>(f: impl FnOnce(&mut Model) -> Result<R, String>) -> Result<R, String> {
     STATE.with(|cell| {
         let mut opt = cell.borrow_mut();
-        if opt.is_none() {
-            *opt = Some(load()?);
-        }
-        f(opt.as_mut().expect("loaded above"))
+        let model = opt
+            .as_mut()
+            .ok_or_else(|| "file store not initialized: call init first".to_string())?;
+        f(model)
     })
 }
 
 /// Append `op` to the file, then apply it to the in-memory model.
 fn commit(model: &mut Model, op: Op) -> Result<(), String> {
-    append_op(&op)?;
+    append_op(&model.path, &op)?;
     model.apply(&op);
     Ok(())
 }
@@ -315,6 +317,10 @@ fn fwitness_to_w(w: &FWitness) -> WitnessLogRow {
 // ---------------------------------------------------------------------
 
 impl Guest for Component {
+    fn init(config: String) -> Result<(), String> {
+        init_store(&config)
+    }
+
     fn secure_log_insert(row: SecureLogRow) -> Result<u64, String> {
         let seqno = row
             .seqno
