@@ -33,7 +33,10 @@ WASI Preview 2 components (build with
 `cargo component build --target wasm32-wasip2`):
 
 - **`secure-log-component`**: the core, packaged as a component.
-  Imports `secure-log:log/store`, exports `secure-log:log/{encoder,log}`.
+  Imports `secure-log:log/store` + `keys:keystore/signer`, exports
+  `secure-log:log/{encoder,log,checkpoint}`. Checkpoint signing happens
+  in-graph; verification dispatches on the key's algorithm (ed25519 /
+  ecdsa-p256 / rsa-pss-sha256).
 - **`secure-log-store-sqlite`**: a `secure-log:store` provider backed
   by the [`sqlite:wasm`](../sqlite-wasm) component.
 - **`secure-log-store-file`**: a `secure-log:store` provider backed by
@@ -45,50 +48,53 @@ WASI Preview 2 components (build with
   backed by `wasi:http`. Each `rpc` call becomes an HTTP POST to the URL
   in `SECURE_LOG_RPC_URL`. Swap it for any other `transport` provider
   (host function, message queue, ...) without touching the store.
+- **`secure-log-keystore-software`**: a `keys:keystore/signer` provider,
+  pure software (ed25519 / ecdsa-p256 / rsa-pss-sha256, chosen via
+  `SECURE_LOG_KEYSTORE_ALG`). The default in-graph signing backend; the
+  composed softhsm keystore (`keys:keystore` over PKCS#11) is the
+  production alternative.
 
 ## Component architecture (pluggable persistence)
 
 ```text
                     secure-log-component (core)
-                    exports secure-log:log/{encoder,log}
-                    imports secure-log:log/store
-                              │
-              ┌───────────────┼────────────────────┐
-              ▼               ▼                     ▼
-       store-sqlite      store-file           store-remote
-       exports store     exports store        exports store
-       imports           (wasi:filesystem)    imports
-       sqlite:wasm                            secure-log:log/transport
-              │                                      │
-              ▼                                      ▼
-       sqlite-wasm (build/sqlite.wasm)        transport-http
-                                              exports transport
-                                              imports wasi:http
-                                                     │  POST $SECURE_LOG_RPC_URL
-                                                     ▼
-                                              secure-log-rpc-server
-                                              (native; any SecureLogStore)
+                    exports secure-log:log/{encoder,log,checkpoint}
+                    imports secure-log:log/store + keys:keystore/signer
+                              │                         │
+        store ┌──────────────┼───────────────┐        │ keys:keystore/signer
+              ▼              ▼                ▼         ▼
+       store-sqlite     store-file      store-remote   ├── keystore-software
+       imports          (wasi:fs)       imports        │   (ed25519/ecdsa/rsa)
+       sqlite:wasm                      transport      └── keystore (softhsm)
+              │                            │               keystore-pkcs11
+              ▼                            ▼               + pkcs11-provider
+       sqlite-wasm                  transport-http         + softhsm2.component
+       (build/sqlite.wasm)          (wasi:http) -> secure-log-rpc-server
 ```
 
-Persistence is pluggable at two levels: the `SecureLogStore` Rust
-trait (native), and the `secure-log:log/store` WIT interface
-(components, chosen at composition time via `wac plug`).
+Both persistence and signing are pluggable at two levels: the Rust
+traits (`SecureLogStore`, `CheckpointSigner`) for native use, and the
+`secure-log:log/store` + `keys:keystore/signer` WIT interfaces for
+components, chosen at composition time via `wac plug`.
 
 ### Build & compose
 
 ```bash
-# builds the component crates and composes each backend stack
+# builds the component crates and composes each stack (storage + keystore)
 ./scripts/build-components.sh
-# -> dist/secure-log-sqlite.wasm   (core + store-sqlite + sqlite engine)
-# -> dist/secure-log-file.wasm     (core + store-file)
-# -> dist/secure-log-remote.wasm   (core + store-remote + transport-http)
+# -> dist/secure-log-sqlite.wasm        core + store-sqlite + sqlite + software keystore
+# -> dist/secure-log-file.wasm          core + store-file + software keystore
+# -> dist/secure-log-remote.wasm        core + store-remote + transport-http + software keystore
+# -> dist/secure-log-sqlite-pkcs11.wasm core + store-sqlite + sqlite + softhsm keystore
 ```
 
-`secure-log-sqlite.wasm` and `secure-log-file.wasm` import only WASI
-and export `secure-log:log`. `secure-log-remote.wasm` bundles the
-`transport-http` provider, so it imports `wasi:http` (plus WASI) and
-needs `SECURE_LOG_RPC_URL` set and a `secure-log-rpc-server` reachable
-at that URL.
+Since the core signs in-graph, every stack bundles a keystore. The
+sqlite/file/remote stacks bundle the software keystore and import only
+WASI (remote additionally imports `wasi:http`; set `SECURE_LOG_RPC_URL`
+and run `secure-log-rpc-server`). The pkcs11 stack bundles the composed
+softhsm keystore (from [`softhsm-wasm`](../softhsm-wasm), via
+`KEYSTORE_SOFTHSM`) and additionally imports `pkcs11:util` + needs a
+SoftHSM config; it is skipped if that artifact is absent.
 
 ### Configuration
 
@@ -147,31 +153,42 @@ needed:
 
 ```bash
 cd verify
-# args: <composed.wasm> [store-config]
+# args: <composed.wasm> [store-config]; the harness also exercises
+# checkpoint sign + verify-checkpoint-chain in-graph.
 cargo run --release -- ../dist/secure-log-sqlite.wasm ":memory:"
 cargo run --release -- ../dist/secure-log-file.wasm   "audit.jsonl"
 cargo run --release -- ../dist/secure-log-remote.wasm ":memory:"
+# choose the software keystore algorithm:
+SECURE_LOG_KEYSTORE_ALG=ecdsa-p256 cargo run --release -- ../dist/secure-log-sqlite.wasm ":memory:"
+# pkcs11/softhsm signing entirely in-graph (needs the softhsm config):
+cargo run --release -- ../dist/secure-log-sqlite-pkcs11.wasm ":memory:"
 ```
 
-### Checkpoint signing via PKCS#11 (`keys:keystore`)
+### Checkpoint signing (`keys:keystore`)
 
-Phase 3 signs each closed segment's checkpoint hash through a
-`CheckpointSigner`. `secure-log-signer-keystore` implements that trait
-over the `keys:keystore/signer` interface, backed by a software HSM —
-the private key never leaves the wasm sandbox:
+Phase 3 signs each closed segment's checkpoint hash through a keystore
+that exposes `keys:keystore/signer`. The signing key never leaves the
+keystore; verification needs only the public key, so it dispatches on
+the key's algorithm — **ed25519**, **ecdsa-p256**, or
+**rsa-pss-sha256**. Two integration paths share this contract:
+
+**In-graph (component).** The core component imports
+`keys:keystore/signer` and exports a `checkpoint` interface; the
+keystore is composed into the stack via `wac plug`. Signing happens
+entirely inside the wasm graph:
 
 ```text
-NativeSecureLog.sign_segment(&KeystoreSigner, label, segment_id)
-  -> keys:keystore/signer            (get-key(label).sign(hash))
-    -> pkcs11:* (idiomatic Cryptoki)  (pkcs11-provider)
-      -> softhsm:pkcs11 (C-ABI)       (softhsm2.component.wasm)
+checkpoint.sign-segment(identity, segment-id)   (secure-log-component)
+  -> keys:keystore/signer
+       ├─ keystore-software (ed25519 / ecdsa-p256 / rsa-pss-sha256), or
+       └─ softhsm: keystore-pkcs11 -> pkcs11:* -> softhsm:pkcs11
 ```
 
-The three layers compose into one `keystore-softhsm.wasm` (exports
-`keys:keystore/signer`); `KeystoreSigner` drives it in-process with
-wasmtime. Signing happens inside the sandbox; verification is local —
-`keys:keystore` exposes only the public key + algorithm (ed25519), and
-the signer verifies with `ed25519-dalek`.
+**Host-side (native).** `secure-log-signer-keystore` implements the
+`CheckpointSigner` trait by driving the composed `keystore-softhsm.wasm`
+in-process with wasmtime — for daemons/CLIs using `NativeSecureLog`
+directly. The key stays in the softhsm sandbox; verification is local
+(`ed25519-dalek` / `p256` / `rsa`).
 
 ```rust,no_run
 use secure_log::{CborEncoder, NativeSecureLog};

@@ -1,0 +1,12 @@
+package secure-log:verify-host@0.1.0;
+
+// Host-side view for the verify harness: exports the secure-log
+// interfaces the composed component provides, and imports the
+// pkcs11:util pin-provider that the softhsm-backed stack references
+// (stubbed; inline PINs only).
+world verify-host {
+    import pkcs11:util/util;
+    export secure-log:log/encoder@0.1.0;
+    export secure-log:log/log@0.1.0;
+    export secure-log:log/checkpoint@0.1.0;
+}

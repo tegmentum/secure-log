@@ -33,7 +33,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use secure_log::{CheckpointSigner, SignerError};
 use wasmtime::component::{Component, Linker, ResourceAny, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -45,9 +44,6 @@ wasmtime::component::bindgen!({
 });
 
 use exports::keys::keystore::signer::Error as KsError;
-
-/// Stable algorithm identifier for ed25519 keys.
-const ALG_ED25519: &str = "ed25519";
 
 /// Configuration for opening a [`KeystoreSigner`].
 #[derive(Debug, Clone)]
@@ -282,28 +278,72 @@ impl CheckpointSigner for KeystoreSigner {
             .map_err(|_| SignerError::Storage("keystore signer mutex poisoned".into()))?;
         ensure_key(&mut inner, signer_identity)?;
         let entry = &inner.keys[signer_identity];
-
-        if entry.algorithm != ALG_ED25519 {
-            return Err(SignerError::VerifyFailed(format!(
-                "unsupported algorithm '{}' (only {ALG_ED25519})",
-                entry.algorithm
-            )));
-        }
-
-        let pk: [u8; 32] = entry.public_key.as_slice().try_into().map_err(|_| {
-            SignerError::VerifyFailed(format!(
-                "ed25519 public key is {} bytes, expected 32",
-                entry.public_key.len()
-            ))
-        })?;
-        let verifying_key = VerifyingKey::from_bytes(&pk)
-            .map_err(|e| SignerError::VerifyFailed(format!("bad ed25519 public key: {e}")))?;
-
-        // A wrong-length or otherwise malformed signature is simply an
-        // invalid signature, not a backend error.
-        let Ok(sig) = Signature::from_slice(signature) else {
-            return Ok(false);
-        };
-        Ok(verifying_key.verify(message, &sig).is_ok())
+        verify_signature(&entry.algorithm, &entry.public_key, message, signature)
     }
+}
+
+/// Verify `signature` over `message` using `public_key`, dispatching on
+/// the keystore's algorithm. Mirrors the in-graph verifier in
+/// `secure-log-component`: ed25519 signs the message bytes (EdDSA);
+/// ecdsa-p256 and rsa-pss-sha256 hash the message with SHA-256.
+fn verify_signature(
+    algorithm: &str,
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
+    match algorithm {
+        "ed25519" => verify_ed25519(public_key, message, signature),
+        "ecdsa-p256" => verify_ecdsa_p256(public_key, message, signature),
+        "rsa-pss-sha256" => verify_rsa_pss_sha256(public_key, message, signature),
+        other => Err(SignerError::VerifyFailed(format!(
+            "unsupported algorithm '{other}'"
+        ))),
+    }
+}
+
+fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, SignerError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pk: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| SignerError::VerifyFailed("ed25519 public key must be 32 bytes".into()))?;
+    let vk = VerifyingKey::from_bytes(&pk)
+        .map_err(|e| SignerError::VerifyFailed(format!("bad ed25519 key: {e}")))?;
+    let Ok(sig) = Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+    Ok(vk.verify(message, &sig).is_ok())
+}
+
+fn verify_ecdsa_p256(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature, VerifyingKey};
+    let vk = VerifyingKey::from_sec1_bytes(public_key)
+        .map_err(|e| SignerError::VerifyFailed(format!("bad ecdsa-p256 key: {e}")))?;
+    let Ok(sig) = Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+    Ok(vk.verify(message, &sig).is_ok())
+}
+
+fn verify_rsa_pss_sha256(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pss::{Signature, VerifyingKey};
+    use rsa::signature::Verifier;
+    use rsa::RsaPublicKey;
+    let pub_key = RsaPublicKey::from_pkcs1_der(public_key)
+        .map_err(|e| SignerError::VerifyFailed(format!("bad rsa public key: {e}")))?;
+    let vk: VerifyingKey<sha2::Sha256> = VerifyingKey::new(pub_key);
+    let Ok(sig) = Signature::try_from(signature) else {
+        return Ok(false);
+    };
+    Ok(vk.verify(message, &sig).is_ok())
 }

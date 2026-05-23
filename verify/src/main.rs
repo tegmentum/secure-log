@@ -13,8 +13,8 @@ use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 wasmtime::component::bindgen!({
-    path: "../wit",
-    world: "secure-log-host",
+    path: "wit",
+    world: "verify-host",
 });
 
 struct Host {
@@ -42,6 +42,31 @@ impl WasiHttpView for Host {
     }
 }
 
+// The softhsm-backed pkcs11 stack imports a pkcs11:util pin-provider
+// (the credential type references it). It uses inline PINs only, so this
+// host stub is never invoked — it just satisfies the import.
+use pkcs11::util::util::PinProvider;
+impl pkcs11::util::util::Host for Host {}
+impl pkcs11::util::util::HostPinProvider for Host {
+    fn request_secret(
+        &mut self,
+        _self_: wasmtime::component::Resource<PinProvider>,
+        _label: Option<String>,
+        _attempts_remaining: Option<u8>,
+    ) -> Vec<u8> {
+        Vec::new()
+    }
+    fn clear(&mut self, _self_: wasmtime::component::Resource<PinProvider>) {}
+    fn drop(&mut self, _rep: wasmtime::component::Resource<PinProvider>) -> wasmtime::Result<()> {
+        Ok(())
+    }
+}
+
+struct HasSelf<T>(std::marker::PhantomData<T>);
+impl<T: 'static> wasmtime::component::HasData for HasSelf<T> {
+    type Data<'a> = &'a mut T;
+}
+
 fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
@@ -56,6 +81,8 @@ fn main() -> Result<()> {
     // wasi:http for the remote backend. add_only_* avoids re-adding the
     // proxy interfaces that the full wasi linker already registered.
     wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)?;
+    // pkcs11:util pin-provider for the softhsm-backed pkcs11 stack.
+    pkcs11::util::util::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |s| s)?;
 
     // Embed the reference JSON-RPC server on an ephemeral port so the
     // remote backend has an endpoint to talk to. Unused (but harmless)
@@ -64,16 +91,31 @@ fn main() -> Result<()> {
     let rpc_url = format!("http://{rpc_addr}");
     println!("embedded rpc server at {rpc_url}");
 
-    // Preopen the current directory so the append-only file backend
-    // (which uses wasi:filesystem) can read/write its log. Harmless
-    // for the sqlite in-memory backend. SECURE_LOG_RPC_URL is read by
-    // the wasi:http transport provider in the remote stack.
     let mut wasi = WasiCtxBuilder::new();
     wasi.inherit_stdio()
         .inherit_env()
         .env("SECURE_LOG_RPC_URL", &rpc_url);
+    // Preopen the current directory so the append-only file backend
+    // (wasi:filesystem) can read/write its log. Harmless for sqlite.
     if std::path::Path::new(".").exists() {
         wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all())?;
+    }
+    // For the softhsm-backed pkcs11 stack: stage the SoftHSM config and a
+    // token dir, mapped to /config and /data (its tokendir is
+    // /data/tokens). Skipped if no conf is available — software stacks
+    // don't need it.
+    if let Some(conf) = softhsm_conf() {
+        let run = std::env::temp_dir().join(format!("secure-log-verify-{}", std::process::id()));
+        let cfg_dir = run.join("config");
+        let data_dir = run.join("data");
+        std::fs::create_dir_all(&cfg_dir)?;
+        std::fs::create_dir_all(data_dir.join("tokens"))?;
+        std::fs::write(cfg_dir.join("softhsm2-wasi.conf"), std::fs::read(&conf)?)?;
+        wasi.env("SOFTHSM2_CONF", "/config/softhsm2-wasi.conf")
+            .env("KEYSTORE_PIN", "1234")
+            .env("KEYSTORE_SO_PIN", "1234")
+            .preopened_dir(&cfg_dir, "/config", DirPerms::READ, FilePerms::READ)?
+            .preopened_dir(&data_dir, "/data", DirPerms::all(), FilePerms::all())?;
     }
     let mut store = Store::new(
         &engine,
@@ -84,7 +126,7 @@ fn main() -> Result<()> {
         },
     );
 
-    let bindings = SecureLogHost::instantiate(&mut store, &component, &linker)?;
+    let bindings = VerifyHost::instantiate(&mut store, &component, &linker)?;
     let log = bindings.secure_log_log_log();
 
     // open the backing store explicitly (no implicit default).
@@ -146,6 +188,37 @@ fn main() -> Result<()> {
     assert!(tampered.is_err(), "verification should reject a wrong root");
     println!("tamper check: wrong root correctly rejected");
 
+    // in-graph checkpoint signing: the keystore (software or softhsm) is
+    // composed into the stack, so this never leaves the wasm sandbox.
+    let checkpoint = bindings.secure_log_log_checkpoint();
+    let (ckpt_hash, sig) = checkpoint
+        .call_sign_segment(&mut store, "attest", seg.segment_id)?
+        .map_err(anyhow::Error::msg)?;
+    println!(
+        "sign-segment attest seg={} -> hash_len={} sig_len={}",
+        seg.segment_id,
+        ckpt_hash.len(),
+        sig.len()
+    );
+    let signed = checkpoint
+        .call_verify_checkpoint_chain(&mut store, "default")?
+        .map_err(anyhow::Error::msg)?;
+    println!("verify-checkpoint-chain default -> {signed} signed segment(s)");
+    assert_eq!(signed, 1, "exactly one signed segment");
+
     println!("\nALL CHECKS PASSED");
     Ok(())
+}
+
+/// Resolve the SoftHSM config for the pkcs11 stack: `SECURE_LOG_SOFTHSM_CONF`,
+/// else the default `~/git/softhsm-wasm/tests/softhsm2-wasi.conf`. Returns
+/// `None` if absent — software-keystore stacks don't need it.
+fn softhsm_conf() -> Option<std::path::PathBuf> {
+    let p = std::env::var("SECURE_LOG_SOFTHSM_CONF")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join("git/softhsm-wasm/tests/softhsm2-wasi.conf")
+        });
+    p.exists().then_some(p)
 }

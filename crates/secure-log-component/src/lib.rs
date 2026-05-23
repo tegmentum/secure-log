@@ -564,6 +564,22 @@ impl log::Guest for Component {
 
 struct ComponentSigner;
 
+/// A resolved keystore key: the handle plus cached public material.
+struct CachedKey {
+    key: ksigner::Key,
+    algorithm: String,
+    public_key: Vec<u8>,
+}
+
+thread_local! {
+    // label -> resolved key. Resolved once per label per instance: some
+    // keystore backends (e.g. the softhsm adapter) run a login/provision
+    // ceremony in `get-key` that is not idempotent, so a fresh `get-key`
+    // per sign and per verify would fail.
+    static KEYS: RefCell<std::collections::HashMap<String, CachedKey>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
 fn map_ks(e: ksigner::Error) -> SignerError {
     match e {
         ksigner::Error::KeyNotFound(s) => SignerError::UnknownIdentity(s),
@@ -575,14 +591,34 @@ fn map_ks(e: ksigner::Error) -> SignerError {
     }
 }
 
+/// Run `f` against the (cached) key resolved for `label`.
+fn with_key<R>(label: &str, f: impl FnOnce(&CachedKey) -> R) -> Result<R, SignerError> {
+    KEYS.with(|cell| {
+        let mut keys = cell.borrow_mut();
+        if !keys.contains_key(label) {
+            let key = ksigner::get_key(label).map_err(map_ks)?;
+            let algorithm = key.algorithm();
+            let public_key = key.public_key();
+            keys.insert(
+                label.to_string(),
+                CachedKey {
+                    key,
+                    algorithm,
+                    public_key,
+                },
+            );
+        }
+        Ok(f(keys.get(label).expect("inserted above")))
+    })
+}
+
 impl CheckpointSigner for ComponentSigner {
     fn sign_checkpoint(
         &self,
         identity_name: &str,
         message: &[u8],
     ) -> Result<(Vec<u8>, String), SignerError> {
-        let key = ksigner::get_key(identity_name).map_err(map_ks)?;
-        let signature = key.sign(message).map_err(map_ks)?;
+        let signature = with_key(identity_name, |ck| ck.key.sign(message))?.map_err(map_ks)?;
         Ok((signature, identity_name.to_string()))
     }
 
@@ -592,8 +628,9 @@ impl CheckpointSigner for ComponentSigner {
         message: &[u8],
         signature: &[u8],
     ) -> Result<bool, SignerError> {
-        let key = ksigner::get_key(signer_identity).map_err(map_ks)?;
-        verify_signature(&key.algorithm(), &key.public_key(), message, signature)
+        let (algorithm, public_key) =
+            with_key(signer_identity, |ck| (ck.algorithm.clone(), ck.public_key.clone()))?;
+        verify_signature(&algorithm, &public_key, message, signature)
     }
 }
 
