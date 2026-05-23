@@ -172,10 +172,38 @@ interface log {
 }
 
 // ---------------------------------------------------------------------
-// Host world. A WASM component implementing both interfaces is a
+// Pluggable checkpoint signing (Phase 3).
+//
+// Signing is in-graph: the core component imports a keystore (see
+// `keys:keystore/signer`) and exposes these operations. The signing key
+// never crosses the component boundary; verification dispatches on the
+// key's algorithm (ed25519 / ecdsa-p256 / rsa-pss-sha256) using the
+// public key the keystore exposes. This interface carries no external
+// dependency, so storage providers that only reference the package are
+// unaffected.
+// ---------------------------------------------------------------------
+interface checkpoint {
+    // Sign the checkpoint of a closed segment using the keystore key
+    // bound to `identity`, and persist the signature on the segment.
+    // Returns (checkpoint-hash, signature).
+    sign-segment: func(identity: string, segment-id: u64)
+        -> result<tuple<list<u8>, list<u8>>, string>;
+
+    // Verify one closed segment's stored signature against its
+    // recomputed checkpoint hash. Returns the checkpoint hash.
+    verify-segment-signature: func(segment-id: u64) -> result<list<u8>, string>;
+
+    // Verify a stream's whole checkpoint chain from genesis to head.
+    // Returns the number of signed segments walked.
+    verify-checkpoint-chain: func(stream-id: string) -> result<u32, string>;
+}
+
+// ---------------------------------------------------------------------
+// Host world. A WASM component implementing these interfaces is a
 // drop-in replacement for the native Rust backend.
 // ---------------------------------------------------------------------
 world secure-log-host {
     export encoder;
     export log;
+    export checkpoint;
 }

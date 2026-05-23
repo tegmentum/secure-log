@@ -17,9 +17,11 @@ mod bindings;
 use std::cell::RefCell;
 
 use secure_log::{
-    CanonicalEncoder, CborEncoder, NativeSecureLog, SecureLog, SecureLogStore, HASH_LEN,
+    CanonicalEncoder, CborEncoder, CheckpointSigner, NativeSecureLog, SecureLog, SecureLogStore,
+    SignerError, HASH_LEN,
 };
 
+use bindings::exports::secure_log::log::checkpoint;
 use bindings::exports::secure_log::log::encoder::{
     self, CheckpointFields as WCheckpointFields, EntryFields as WEntryFields,
 };
@@ -27,6 +29,9 @@ use bindings::exports::secure_log::log::log::{
     self, AppendResult as WAppendResult, InclusionProof as WInclusionProof, ProofStep as WProofStep,
     SegmentInfo as WSegmentInfo,
 };
+// Imported keystore: the signing key lives in whatever provider is
+// composed in; only the handle + public key cross this boundary.
+use bindings::keys::keystore::signer as ksigner;
 use bindings::secure_log::log::store as wstore;
 
 struct Component;
@@ -545,6 +550,140 @@ impl log::Guest for Component {
         let core_proof = proof_from_w(proof)?;
         let root = digest_from_vec(expected_root)?;
         secure_log::verify_inclusion_proof(&core_proof, &root).map_err(|e| e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------
+// In-graph checkpoint signing.
+//
+// `ComponentSigner` adapts the imported `keys:keystore/signer` to the
+// core `CheckpointSigner` trait. Signing is delegated to the keystore
+// (the key never crosses the boundary); verification is done here,
+// dispatching on the key's algorithm over its public key.
+// ---------------------------------------------------------------------
+
+struct ComponentSigner;
+
+fn map_ks(e: ksigner::Error) -> SignerError {
+    match e {
+        ksigner::Error::KeyNotFound(s) => SignerError::UnknownIdentity(s),
+        ksigner::Error::UnsupportedAlgorithm(s) => {
+            SignerError::SignFailed(format!("unsupported algorithm: {s}"))
+        }
+        ksigner::Error::AccessDenied(s) => SignerError::SignFailed(format!("access denied: {s}")),
+        ksigner::Error::Backend(s) => SignerError::Storage(s),
+    }
+}
+
+impl CheckpointSigner for ComponentSigner {
+    fn sign_checkpoint(
+        &self,
+        identity_name: &str,
+        message: &[u8],
+    ) -> Result<(Vec<u8>, String), SignerError> {
+        let key = ksigner::get_key(identity_name).map_err(map_ks)?;
+        let signature = key.sign(message).map_err(map_ks)?;
+        Ok((signature, identity_name.to_string()))
+    }
+
+    fn verify_checkpoint(
+        &self,
+        signer_identity: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        let key = ksigner::get_key(signer_identity).map_err(map_ks)?;
+        verify_signature(&key.algorithm(), &key.public_key(), message, signature)
+    }
+}
+
+/// Verify `signature` over `message` using `public_key`, dispatching on
+/// the keystore's algorithm identifier. Sign and verify share the same
+/// convention: ed25519 signs the message bytes (EdDSA); ecdsa-p256 and
+/// rsa-pss-sha256 hash the message with SHA-256 internally.
+fn verify_signature(
+    algorithm: &str,
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
+    match algorithm {
+        "ed25519" => verify_ed25519(public_key, message, signature),
+        "ecdsa-p256" => verify_ecdsa_p256(public_key, message, signature),
+        "rsa-pss-sha256" => verify_rsa_pss_sha256(public_key, message, signature),
+        other => Err(SignerError::VerifyFailed(format!(
+            "unsupported algorithm '{other}'"
+        ))),
+    }
+}
+
+fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, SignerError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pk: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| SignerError::VerifyFailed("ed25519 public key must be 32 bytes".into()))?;
+    let vk = VerifyingKey::from_bytes(&pk)
+        .map_err(|e| SignerError::VerifyFailed(format!("bad ed25519 key: {e}")))?;
+    let Ok(sig) = Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+    Ok(vk.verify(message, &sig).is_ok())
+}
+
+fn verify_ecdsa_p256(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature, VerifyingKey};
+    let vk = VerifyingKey::from_sec1_bytes(public_key)
+        .map_err(|e| SignerError::VerifyFailed(format!("bad ecdsa-p256 key: {e}")))?;
+    let Ok(sig) = Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+    Ok(vk.verify(message, &sig).is_ok())
+}
+
+fn verify_rsa_pss_sha256(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pss::{Signature, VerifyingKey};
+    use rsa::signature::Verifier;
+    use rsa::RsaPublicKey;
+    let pub_key = RsaPublicKey::from_pkcs1_der(public_key)
+        .map_err(|e| SignerError::VerifyFailed(format!("bad rsa public key: {e}")))?;
+    let vk: VerifyingKey<sha2::Sha256> = VerifyingKey::new(pub_key);
+    let Ok(sig) = Signature::try_from(signature) else {
+        return Ok(false);
+    };
+    Ok(vk.verify(message, &sig).is_ok())
+}
+
+// ---------------------------------------------------------------------
+// Exported `checkpoint` interface.
+// ---------------------------------------------------------------------
+
+impl checkpoint::Guest for Component {
+    fn sign_segment(identity: String, segment_id: u64) -> Result<(Vec<u8>, Vec<u8>), String> {
+        with_log(|log| log.sign_segment(&ComponentSigner, &identity, segment_id))
+            .map(|(hash, sig)| (hash.to_vec(), sig))
+            .map_err(|e| e.to_string())
+    }
+
+    fn verify_segment_signature(segment_id: u64) -> Result<Vec<u8>, String> {
+        with_log(|log| log.verify_segment_signature(&ComponentSigner, segment_id))
+            .map(|hash| hash.to_vec())
+            .map_err(|e| e.to_string())
+    }
+
+    fn verify_checkpoint_chain(stream_id: String) -> Result<u32, String> {
+        with_log(|log| log.verify_checkpoint_chain(&ComponentSigner, &stream_id))
+            .map(|n| n as u32)
+            .map_err(|e| e.to_string())
     }
 }
 

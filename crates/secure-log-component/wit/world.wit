@@ -1,0 +1,18 @@
+package secure-log:core-signing@0.1.0;
+
+// The secure-log core, with in-graph checkpoint signing.
+//
+// Imports persistence (`secure-log:log/store`) and a keystore
+// (`keys:keystore/signer`); exports the encoder, the log, and the
+// checkpoint signing interface. Compose with a store provider and a
+// keystore provider via `wac plug`. The keystore import is declared
+// here (not in the shared secure-log:log package) so storage-only
+// providers are unaffected.
+world secure-log-core-signing {
+    import secure-log:log/store@0.1.0;
+    import keys:keystore/signer;
+
+    export secure-log:log/encoder@0.1.0;
+    export secure-log:log/log@0.1.0;
+    export secure-log:log/checkpoint@0.1.0;
+}

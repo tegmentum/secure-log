@@ -14,7 +14,23 @@ wit-bindgen = { workspace = true }
 wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
 secure-log = { workspace = true }
 anyhow = "1"
+# In-graph checkpoint verification dispatches on the key algorithm.
+# Verify-only here (signing happens in the keystore), so no RNG needed.
+ed25519-dalek = "2"
+p256 = "0.13"
+rsa = "0.9"
+sha2 = { workspace = true }
 
 [package.metadata.component]
-package = "secure-log:log"
-target = { path = "../../wit", world = "secure-log-core" }
+package = "secure-log:core-signing"
+
+[package.metadata.component.target]
+path = "wit"
+world = "secure-log-core-signing"
+
+# secure-log:log (the shared interfaces) + keys:keystore (the signer
+# import), each a self-contained dir. cargo-component resolves target
+# deps only from this table, parsing each in isolation.
+[package.metadata.component.target.dependencies]
+"secure-log:log" = { path = "../../wit" }
+"keys:keystore" = { path = "wit-deps/keys-keystore" }
