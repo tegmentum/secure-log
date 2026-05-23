@@ -1,0 +1,181 @@
+// Pluggable secure logging contract for the TPM operator platform.
+//
+// Two pluggability axes:
+//
+//   1. `encoder`  -- serializes log entries and checkpoints to canonical
+//                    bytes. Different encodings (CBOR, protobuf, custom)
+//                    satisfy the same interface. The encoding name is
+//                    recorded alongside each entry so verifiers can pick
+//                    the correct decoder.
+//
+//   2. `log`      -- the full logging subsystem: append, read, segment
+//                    closure, chain/inclusion/checkpoint verification.
+//                    Different storage backends (native SQLite, an
+//                    append-only file, a remote service, an external
+//                    WASM component) satisfy the same interface.
+//
+// The hash algorithm (SHA-256) and the canonical "chain hash" formula
+// are frozen per-version: changing them is a world version bump.
+//
+// The native Rust implementation in crates/tpm-core/src/secure_log/
+// mirrors this WIT verbatim as Rust traits. A WASM component
+// implementing `secure-log-host` can replace either piece at runtime.
+
+package secure-log:log@0.1.0;
+
+// ---------------------------------------------------------------------
+// Pluggable canonical encoder.
+// ---------------------------------------------------------------------
+interface encoder {
+    // Structural representation of a log entry passed to the encoder.
+    //
+    // `prev-entry-hash` is 32 zero bytes for the genesis entry of a
+    // stream. The encoder treats this as an opaque byte string and
+    // must not interpret it.
+    record entry-fields {
+        version:          u32,
+        stream-id:        string,
+        session-id:       string,
+        boot-id:          string,
+        seqno:            u64,
+        timestamp-rfc3339: string,
+        event-type:       string,
+        severity:         string,
+        producer:         string,
+        payload-encoding: string,
+        payload:          list<u8>,
+        prev-entry-hash:  list<u8>,
+    }
+
+    // Structural representation of a segment checkpoint.
+    record checkpoint-fields {
+        version:              u32,
+        stream-id:            string,
+        segment-id:           u64,
+        seq-start:            u64,
+        seq-end:              u64,
+        merkle-root:          list<u8>,
+        last-entry-hash:      list<u8>,
+        prev-checkpoint-hash: list<u8>,
+        boot-id:              string,
+        session-id:           string,
+        policy-hash:          list<u8>,
+        timestamp-rfc3339:    string,
+    }
+
+    // Encode an entry. The output is the exact byte sequence that will
+    // be hashed and stored. The encoding MUST be deterministic: two
+    // calls with identical inputs MUST produce identical bytes.
+    encode-entry: func(fields: entry-fields) -> list<u8>;
+
+    // Encode a checkpoint. Same determinism requirement.
+    encode-checkpoint: func(fields: checkpoint-fields) -> list<u8>;
+
+    // Stable identifier for this encoder, stored in each entry's
+    // `payload-encoding` field so verifiers can pick the right decoder.
+    // Examples: "cbor", "cbor+aead-chacha20poly1305", "protobuf".
+    name: func() -> string;
+}
+
+// ---------------------------------------------------------------------
+// Pluggable secure log backend.
+// ---------------------------------------------------------------------
+interface log {
+    use encoder.{entry-fields, checkpoint-fields};
+
+    // Open / configure the backing store. MUST be called once before
+    // any other method. `config` is forwarded verbatim to the store
+    // backend (see `store.init` for the per-backend format). There is
+    // no implicit default — an empty config is an error.
+    open: func(config: string) -> result<_, string>;
+
+    // Metadata describing a successfully appended entry.
+    record append-result {
+        seqno:      u64,
+        entry-hash: list<u8>,
+    }
+
+    // A closed segment with a Merkle root over its entries.
+    record segment-info {
+        segment-id:           u64,
+        stream-id:            string,
+        seq-start:            u64,
+        seq-end:              u64,
+        merkle-root:          list<u8>,
+        last-entry-hash:      list<u8>,
+        prev-checkpoint-hash: list<u8>,
+        closed-at-rfc3339:    string,
+        signature:            option<list<u8>>,
+        signer-identity:      option<string>,
+    }
+
+    // Merkle inclusion proof for a single entry.
+    record inclusion-proof {
+        seqno:       u64,
+        entry-hash:  list<u8>,
+        segment-id:  u64,
+        merkle-root: list<u8>,
+        // Sibling hashes bottom-up, paired with a bit indicating which
+        // side the sibling was on (false = left, true = right sibling).
+        path:        list<proof-step>,
+    }
+
+    record proof-step {
+        sibling-hash: list<u8>,
+        right:        bool,
+    }
+
+    // Append a new entry to the given stream. Backends compute the
+    // seqno, prev_entry_hash, and entry_hash; the caller only supplies
+    // the event metadata and payload bytes.
+    append: func(
+        stream-id:    string,
+        event-type:   string,
+        severity:     string,
+        producer:     string,
+        payload:      list<u8>,
+    ) -> result<append-result, string>;
+
+    // Read a single entry by sequence number.
+    read: func(seqno: u64) -> result<entry-fields, string>;
+
+    // Return the highest seqno in the given stream, or none if empty.
+    head: func(stream-id: string) -> result<option<u64>, string>;
+
+    // Walk the hash chain between two sequence numbers (inclusive) and
+    // verify every link. Returns ok(_) if the chain is intact, err(_)
+    // with a diagnostic if any link is broken.
+    verify-chain: func(
+        stream-id:  string,
+        from-seqno: u64,
+        to-seqno:   u64,
+    ) -> result<_, string>;
+
+    // Close the current open segment for the given stream, building
+    // the Merkle root over all entries since the last close.
+    close-segment: func(stream-id: string) -> result<segment-info, string>;
+
+    // List all closed segments for the given stream.
+    list-segments: func(stream-id: string) -> list<segment-info>;
+
+    // Read a single segment by id.
+    read-segment: func(segment-id: u64) -> result<segment-info, string>;
+
+    // Build an inclusion proof for a seqno in its segment's Merkle tree.
+    build-inclusion-proof: func(seqno: u64) -> result<inclusion-proof, string>;
+
+    // Verify a standalone inclusion proof against an expected root.
+    verify-inclusion-proof: func(
+        proof:         inclusion-proof,
+        expected-root: list<u8>,
+    ) -> result<_, string>;
+}
+
+// ---------------------------------------------------------------------
+// Host world. A WASM component implementing both interfaces is a
+// drop-in replacement for the native Rust backend.
+// ---------------------------------------------------------------------
+world secure-log-host {
+    export encoder;
+    export log;
+}

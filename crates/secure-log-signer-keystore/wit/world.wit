@@ -1,0 +1,11 @@
+package secure-log:keystore-host@0.1.0;
+
+// Host-side view of the composed keystore component (keystore-pkcs11 +
+// pkcs11-provider + softhsm). The host calls the exported, ceremony-free
+// keys:keystore/signer; the component also imports a pkcs11:util
+// pin-provider (the credential type references it), which the host stubs
+// since the flow uses inline PINs only.
+world keystore-host {
+    import pkcs11:util/util;
+    export keys:keystore/signer;
+}

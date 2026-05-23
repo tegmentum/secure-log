@@ -1,0 +1,15 @@
+[package]
+name = "secure-log-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared JSON-RPC wire contract for the secure-log remote store: row mirror types and method-name constants used by both the store-remote provider and any RPC server."
+
+# Pure serde types + string constants. Builds for both wasm32-wasip2
+# (the store-remote component) and native (the RPC server), so neither
+# side can drift from the other on field shapes or method names.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

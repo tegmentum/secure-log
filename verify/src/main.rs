@@ -9,6 +9,8 @@ use anyhow::Result;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
+use wasmtime_wasi_http::WasiHttpCtx;
 
 wasmtime::component::bindgen!({
     path: "../wit",
@@ -17,6 +19,7 @@ wasmtime::component::bindgen!({
 
 struct Host {
     wasi: WasiCtx,
+    http: WasiHttpCtx,
     table: ResourceTable,
 }
 
@@ -25,6 +28,16 @@ impl WasiView for Host {
         WasiCtxView {
             ctx: &mut self.wasi,
             table: &mut self.table,
+        }
+    }
+}
+
+impl WasiHttpView for Host {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: Default::default(),
         }
     }
 }
@@ -40,12 +53,25 @@ fn main() -> Result<()> {
 
     let mut linker: Linker<Host> = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    // wasi:http for the remote backend. add_only_* avoids re-adding the
+    // proxy interfaces that the full wasi linker already registered.
+    wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)?;
+
+    // Embed the reference JSON-RPC server on an ephemeral port so the
+    // remote backend has an endpoint to talk to. Unused (but harmless)
+    // for the sqlite/file backends.
+    let (rpc_addr, _rpc_thread) = secure_log_rpc_server::spawn("127.0.0.1:0")?;
+    let rpc_url = format!("http://{rpc_addr}");
+    println!("embedded rpc server at {rpc_url}");
 
     // Preopen the current directory so the append-only file backend
     // (which uses wasi:filesystem) can read/write its log. Harmless
-    // for the sqlite in-memory backend.
+    // for the sqlite in-memory backend. SECURE_LOG_RPC_URL is read by
+    // the wasi:http transport provider in the remote stack.
     let mut wasi = WasiCtxBuilder::new();
-    wasi.inherit_stdio().inherit_env();
+    wasi.inherit_stdio()
+        .inherit_env()
+        .env("SECURE_LOG_RPC_URL", &rpc_url);
     if std::path::Path::new(".").exists() {
         wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all())?;
     }
@@ -53,6 +79,7 @@ fn main() -> Result<()> {
         &engine,
         Host {
             wasi: wasi.build(),
+            http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
         },
     );

@@ -1,0 +1,16 @@
+package secure-log:transport-http@0.1.0;
+
+// A `secure-log:log/transport` provider backed by wasi:http. Each
+// `rpc(method, params-json)` call is sent as one HTTP POST to the URL
+// in the SECURE_LOG_RPC_URL environment variable; the response body is
+// returned verbatim (2xx -> ok, otherwise -> err). Compose with
+// `wac plug` into the store-remote provider, which imports `transport`.
+//
+//   transport-http --(transport)--> store-remote --(store)--> core
+//
+// wasi:http@0.2.6 / wasi:cli@0.2.6 match the wasmtime-wasi-http 44 host.
+world transport-http {
+    import wasi:http/outgoing-handler@0.2.6;
+    import wasi:cli/environment@0.2.6;
+    export secure-log:log/transport@0.1.0;
+}

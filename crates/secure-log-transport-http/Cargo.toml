@@ -1,0 +1,38 @@
+[package]
+name = "secure-log-transport-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "secure-log:log/transport provider backed by wasi:http. Forwards each remote-store JSON-RPC call as an HTTP POST to SECURE_LOG_RPC_URL."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "secure-log:transport-http"
+
+[package.metadata.component.target]
+path = "wit"
+world = "transport-http"
+
+# cargo-component 0.21 resolves target deps only from this table (it does
+# not scan wit/deps), and parses each entry in isolation. So every package
+# in the closure is listed, and each vendored dir under wit-vendor/<pkg>/ is
+# self-contained (its own deps/ holds the rest of the closure). The wasi:*
+# packages are the full official @0.2.6 set (via `wkg wit fetch`), matching
+# the wasmtime-wasi-http 44 host; trimming them breaks the preview1 adapter
+# merge. Regenerate with scripts/vendor-transport-wit.sh.
+[package.metadata.component.target.dependencies]
+"wasi:io" = { path = "wit-vendor/io" }
+"wasi:clocks" = { path = "wit-vendor/clocks" }
+"wasi:random" = { path = "wit-vendor/random" }
+"wasi:filesystem" = { path = "wit-vendor/filesystem" }
+"wasi:sockets" = { path = "wit-vendor/sockets" }
+"wasi:cli" = { path = "wit-vendor/cli" }
+"wasi:http" = { path = "wit-vendor/http" }
+"secure-log:log" = { path = "wit-vendor/secure-log-log" }

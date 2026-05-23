@@ -3,10 +3,14 @@ resolver = "2"
 members = [
     "crates/secure-log",
     "crates/secure-log-sqlite",
+    "crates/secure-log-rpc",
+    "crates/secure-log-rpc-server",
     "crates/secure-log-component",
     "crates/secure-log-store-sqlite",
     "crates/secure-log-store-file",
     "crates/secure-log-store-remote",
+    "crates/secure-log-transport-http",
+    "crates/secure-log-signer-keystore",
 ]
 exclude = [
     # Native host-side verification harness (uses the wasmtime crate);
@@ -21,6 +25,8 @@ exclude = [
 default-members = [
     "crates/secure-log",
     "crates/secure-log-sqlite",
+    "crates/secure-log-rpc",
+    "crates/secure-log-rpc-server",
 ]
 
 [workspace.package]
@@ -54,6 +60,8 @@ wit-bindgen = "0.44"
 
 # Internal
 secure-log = { path = "crates/secure-log" }
+secure-log-sqlite = { path = "crates/secure-log-sqlite" }
+secure-log-rpc = { path = "crates/secure-log-rpc" }
 
 # Test-only
 tempfile = "3"

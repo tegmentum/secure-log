@@ -1,0 +1,180 @@
+// Pluggable persistence contract for the secure log.
+//
+// This interface mirrors the Rust `SecureLogStore` trait 1:1. A WASM
+// component that exports `store` is a drop-in persistence backend:
+// SQLite, an append-only file, a remote networked machine, etc. The
+// secure-log core component imports this interface, so the storage
+// backend is chosen at composition time via `wac plug`.
+//
+// All fallible methods return `result<T, string>`; the error string
+// is a human-readable diagnostic (the Rust side surfaces it as
+// `anyhow::Error`).
+
+interface store {
+    // -- Row types (mirror the Rust SecureLogStore row structs) ----
+
+    // A row in the append-only entry table. `seqno` is `none` when
+    // inserting (the store assigns it) and `some` when reading.
+    record secure-log-row {
+        seqno:            option<u64>,
+        stream-id:        string,
+        session-id:       string,
+        boot-id:          string,
+        timestamp-rfc3339: string,
+        event-type:       string,
+        severity:         string,
+        producer:         string,
+        payload-encoding: string,
+        payload:          list<u8>,
+        prev-entry-hash:  list<u8>,
+        entry-hash:       list<u8>,
+    }
+
+    // A row in the Merkle-sealed segment table. `segment-id` is
+    // `none` when inserting and `some` when reading.
+    record secure-log-segment-row {
+        segment-id:           option<u64>,
+        stream-id:            string,
+        seq-start:            u64,
+        seq-end:              u64,
+        merkle-root:          list<u8>,
+        last-entry-hash:      list<u8>,
+        prev-checkpoint-hash: list<u8>,
+        closed-at-rfc3339:    string,
+        signature:            option<list<u8>>,
+        signer-identity:      option<string>,
+    }
+
+    // Per-stream metadata.
+    record secure-log-stream-row {
+        name:                 string,
+        tier:                 string,
+        description:          option<string>,
+        created-at-rfc3339:   string,
+        deprecated-at-rfc3339: option<string>,
+    }
+
+    // An externally-witnessed checkpoint receipt. `id` is `none` when
+    // inserting and `some` when reading.
+    record witness-log-row {
+        id:                  option<s64>,
+        stream-id:           string,
+        segment-id:          u64,
+        seq-start:           u64,
+        seq-end:             u64,
+        checkpoint-hash-hex: string,
+        signature-hex:       string,
+        signer-identity:     string,
+        received-at-rfc3339: string,
+    }
+
+    // A (seqno, leaf-index) pair recorded when a segment is sealed.
+    type segment-entry = tuple<u64, u64>;
+
+    // -- Lifecycle -------------------------------------------------
+
+    // Open / configure the backing store. MUST be called once before
+    // any other method; all other methods return an error until it
+    // succeeds. `config` is a backend-specific locator:
+    //
+    //   sqlite : SQLite database path, or ":memory:" for an ephemeral
+    //            in-memory database (intended for tests only).
+    //   file   : path to the append-only JSON-lines log file.
+    //   remote : endpoint locator passed through to the transport.
+    //
+    // An empty `config` is an error: there is no implicit default.
+    init: func(config: string) -> result<_, string>;
+
+    // -- Phase 1: entries -----------------------------------------
+
+    secure-log-insert: func(row: secure-log-row) -> result<u64, string>;
+    secure-log-global-head: func() -> result<option<u64>, string>;
+    secure-log-get: func(seqno: u64) -> result<option<secure-log-row>, string>;
+    secure-log-range: func(stream-id: string, from-seqno: u64, to-seqno: u64)
+        -> result<list<secure-log-row>, string>;
+    secure-log-head: func(stream-id: string) -> result<option<u64>, string>;
+    secure-log-last: func(stream-id: string) -> result<option<secure-log-row>, string>;
+
+    // -- Phase 2: segments ----------------------------------------
+
+    secure-log-segment-insert: func(
+        row: secure-log-segment-row,
+        entries: list<segment-entry>,
+    ) -> result<u64, string>;
+    secure-log-segment-get: func(segment-id: u64)
+        -> result<option<secure-log-segment-row>, string>;
+    secure-log-segments-list: func(stream-id: string)
+        -> result<list<secure-log-segment-row>, string>;
+    secure-log-segment-last-seqno: func(stream-id: string)
+        -> result<option<u64>, string>;
+    secure-log-segment-entry-seqnos: func(segment-id: u64)
+        -> result<list<u64>, string>;
+    secure-log-segment-for-seqno: func(seqno: u64)
+        -> result<option<u64>, string>;
+    secure-log-segment-set-signature: func(
+        segment-id: u64,
+        signature: list<u8>,
+        signer-identity: string,
+    ) -> result<_, string>;
+
+    // -- Phase 4: witness log -------------------------------------
+
+    witness-log-insert: func(row: witness-log-row) -> result<u64, string>;
+    witness-log-latest: func(stream-id: string)
+        -> result<option<witness-log-row>, string>;
+    witness-log-list: func(stream-id: string)
+        -> result<list<witness-log-row>, string>;
+    witness-log-stream-ids: func() -> result<list<string>, string>;
+    witness-log-gc: func(
+        stream-id: option<string>,
+        keep-latest: option<u32>,
+        older-than-rfc3339: option<string>,
+    ) -> result<u32, string>;
+
+    // -- Stream metadata ------------------------------------------
+
+    secure-log-stream-upsert: func(row: secure-log-stream-row) -> result<_, string>;
+    secure-log-stream-get: func(name: string)
+        -> result<option<secure-log-stream-row>, string>;
+    secure-log-stream-list: func() -> result<list<secure-log-stream-row>, string>;
+    secure-log-stream-set-tier: func(name: string, tier: string) -> result<_, string>;
+    secure-log-stream-deprecate: func(name: string, deprecated-at-rfc3339: string)
+        -> result<_, string>;
+}
+
+// ---------------------------------------------------------------------
+// Pluggable RPC transport for the remote store backend.
+//
+// The remote store provider forwards each store operation as a
+// JSON-RPC call over this interface: `method` is the store function
+// name (e.g. "secure-log-insert") and `params-json` / the returned
+// string are JSON-encoded argument and result payloads. The actual
+// networking (wasi:http, a host function, gRPC, a message queue, ...)
+// is supplied by whatever component or host implements `transport`,
+// so the transport is itself swappable.
+// ---------------------------------------------------------------------
+interface transport {
+    // Perform one request/response round trip. Returns the JSON
+    // result payload on success, or a diagnostic on failure.
+    rpc: func(method: string, params-json: string) -> result<string, string>;
+}
+
+// ---------------------------------------------------------------------
+// Worlds for the pluggable component architecture.
+// ---------------------------------------------------------------------
+
+// The core secure-log component. It owns all integrity logic
+// (hash chain, Merkle sealing, inclusion proofs) but delegates
+// persistence to an imported `store`. Compose it with any
+// `store-provider` component via `wac plug`.
+world secure-log-core {
+    import store;
+    export encoder;
+    export log;
+}
+
+// A persistence backend. SQLite, append-only file, and remote
+// implementations all export this same world.
+world store-provider {
+    export store;
+}

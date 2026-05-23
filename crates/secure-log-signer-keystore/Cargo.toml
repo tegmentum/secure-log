@@ -1,0 +1,21 @@
+[package]
+name = "secure-log-signer-keystore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CheckpointSigner backed by the keys:keystore/signer interface (PKCS#11 via softhsm-wasm), driven in-process with wasmtime. The signing key never leaves the wasm sandbox."
+
+# Native host-side crate that embeds wasmtime to drive a composed
+# keys:keystore component. Heavy deps (wasmtime), so it is a workspace
+# member but NOT a default-member — build/test it with `-p`.
+
+[dependencies]
+secure-log = { workspace = true }
+wasmtime = { version = "44", features = ["component-model"] }
+wasmtime-wasi = "44"
+ed25519-dalek = "2"
+anyhow = "1"
+
+[dev-dependencies]
+secure-log-sqlite = { workspace = true }
