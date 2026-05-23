@@ -1,0 +1,30 @@
+[package]
+name = "secure-log-keystore-software"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-software keys:keystore/signer provider (ed25519 / ecdsa-p256 / rsa-pss-sha256). The default in-graph signing backend for dev/CI; deterministic keys derived from the label."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+ed25519-dalek = "2"
+p256 = "0.13"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = { workspace = true }
+rand_chacha = "0.3"
+rand_core = "0.6"
+
+[package.metadata.component]
+package = "secure-log:keystore-software"
+
+[package.metadata.component.target]
+path = "wit"
+world = "keystore-software"
+
+[package.metadata.component.target.dependencies]
+"keys:keystore" = { path = "wit-deps/keys-keystore" }

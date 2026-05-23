@@ -1,0 +1,12 @@
+package secure-log:keystore-software@0.1.0;
+
+// A pure-software keys:keystore/signer provider. Holds keys in-process
+// (no token, no PIN); compose with `wac plug` as the default signing
+// backend for the secure-log stacks. Keys are derived deterministically
+// from the label, so the same label yields the same key across runs
+// within a build. Algorithm is selected by the SECURE_LOG_KEYSTORE_ALG
+// environment variable (ed25519 | ecdsa-p256 | rsa-pss-sha256;
+// default ed25519).
+world keystore-software {
+    export keys:keystore/signer;
+}
