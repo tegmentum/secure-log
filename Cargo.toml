@@ -26,7 +26,6 @@ default-members = [
     "crates/secure-log",
     "crates/secure-log-sqlite",
     "crates/secure-log-rpc",
-    "crates/secure-log-rpc-server",
 ]
 
 [workspace.package]

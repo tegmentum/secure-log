@@ -18,11 +18,8 @@ Native (build with `cargo build` / `cargo test`):
   own migrations.
 - **`secure-log-rpc`**: the JSON-RPC wire contract (row mirror types +
   method-name constants) shared by the remote store provider and the
-  server, so the two ends cannot drift.
-- **`secure-log-rpc-server`**: the reference JSON-RPC server. Terminates
-  the remote wire protocol and dispatches each of the 23 store ops to a
-  native `SecureLogStore` (SQLite-backed). The host-side peer of the
-  remote backend.
+  remote endpoint, so the two ends cannot drift. Pure serde; compiles to
+  both wasm and native.
 
 WASI Preview 2 components (build with
 `cargo component build --target wasm32-wasip2`):
@@ -48,6 +45,11 @@ WASI Preview 2 components (build with
   `SECURE_LOG_KEYSTORE_ALG`). The default in-graph signing backend; the
   composed softhsm keystore (`keys:keystore` over PKCS#11) is the
   production alternative.
+- **`secure-log-rpc-server`**: the remote store's endpoint as a
+  `wasi:http` guest — imports `secure-log:log/store`, exports
+  `wasi:http/incoming-handler`. Compose with a store provider and run
+  with `wasmtime serve`. Handlers are request-scoped, so it opens a
+  file-backed store per request (`SECURE_LOG_STORE_CONFIG`).
 
 ## Component architecture (pluggable persistence)
 
@@ -64,7 +66,11 @@ WASI Preview 2 components (build with
               │                            │               keystore-pkcs11
               ▼                            ▼               + pkcs11-provider
        sqlite-wasm                  transport-http         + softhsm2.component
-       (build/sqlite.wasm)          (wasi:http) -> secure-log-rpc-server
+       (build/sqlite.wasm)          (wasi:http)
+                                         │ POST $SECURE_LOG_RPC_URL
+                                         ▼
+                                  secure-log-rpc-server (wasi:http guest)
+                                  + store-sqlite  —  `wasmtime serve`
 ```
 
 Both persistence and signing are pluggable at two levels: the Rust
@@ -81,15 +87,18 @@ components, chosen at composition time via `wac plug`.
 # -> dist/secure-log-file.wasm          core + store-file + software keystore
 # -> dist/secure-log-remote.wasm        core + store-remote + transport-http + software keystore
 # -> dist/secure-log-sqlite-pkcs11.wasm core + store-sqlite + sqlite + softhsm keystore
+# -> dist/secure-log-rpc-server.wasm    rpc-server + store-sqlite + sqlite (remote endpoint)
 ```
 
-Since the core signs in-graph, every stack bundles a keystore. The
-sqlite/file/remote stacks bundle the software keystore and import only
-WASI (remote additionally imports `wasi:http`; set `SECURE_LOG_RPC_URL`
-and run `secure-log-rpc-server`). The pkcs11 stack bundles the composed
-softhsm keystore (from [`softhsm-wasm`](../softhsm-wasm), via
-`KEYSTORE_SOFTHSM`) and additionally imports `pkcs11:util` + needs a
-SoftHSM config; it is skipped if that artifact is absent.
+Everything is a wasm guest — there is no host-side secure-log. Since the
+core signs in-graph, every stack bundles a keystore. The
+sqlite/file/remote client stacks bundle the software keystore and import
+only WASI (remote additionally imports `wasi:http`; point
+`SECURE_LOG_RPC_URL` at a running `secure-log-rpc-server.wasm`). The
+pkcs11 stack bundles the composed softhsm keystore (from
+[`softhsm-wasm`](../softhsm-wasm), via `KEYSTORE_SOFTHSM`) and imports
+`pkcs11:util` + needs a SoftHSM config; it is skipped if that artifact is
+absent.
 
 ### Configuration
 
@@ -101,7 +110,7 @@ operation. There is no implicit default — an empty config is an error.
 | ------- | -------------- |
 | sqlite  | SQLite database path, or `":memory:"` (tests only) |
 | file    | path to the append-only JSON-lines log file |
-| remote  | the **server-side** store locator (forwarded to the server's own `init`); the endpoint URL comes from `SECURE_LOG_RPC_URL` |
+| remote  | a handshake value (the endpoint URL comes from `SECURE_LOG_RPC_URL`; the server owns its storage via `SECURE_LOG_STORE_CONFIG`) |
 
 > Note: file-backed sqlite requires the `sqlite:wasm` component to
 > select its WASI VFS for file opens (it defaults to an in-memory
@@ -127,24 +136,30 @@ to `SECURE_LOG_RPC_URL` with body `{"method": ..., "params": ...}`; a
 `transport` interface is itself swappable (host function, message
 queue, ...) — only this one provider depends on `wasi:http`.
 
-`secure-log-rpc-server` is the reference endpoint:
+`secure-log-rpc-server.wasm` is the endpoint — itself a `wasi:http`
+guest, run with `wasmtime serve`:
 
 ```bash
-# start the server (defaults to 127.0.0.1:8787)
-cargo run -p secure-log-rpc-server -- --addr 127.0.0.1:8787
+# -S cli enables filesystem + environment for the wasm guest
+wasmtime serve -S cli --addr 127.0.0.1:8787 \
+  --dir ./state::/data --env SECURE_LOG_STORE_CONFIG=/data/secure-log.db \
+  dist/secure-log-rpc-server.wasm
 ```
 
-It opens its own `SecureLogStore` (SQLite) when it receives the `init`
-call, using the `config` the client passed to `log.open(...)`.
+`wasi:http` handlers are request-scoped, so the server holds no state
+between requests: it opens the file-backed store named by
+`SECURE_LOG_STORE_CONFIG` on each request, runs the op, and the
+filesystem persists it. The client's `init` is a handshake; the server
+owns its storage location.
 
 ### End-to-end verification
 
 `verify/` is a standalone wasmtime host harness (excluded from the
 component workspace) that instantiates a composed component and
-exercises append / read / verify-chain / segment / inclusion-proof.
-For the remote stack it also embeds `secure-log-rpc-server` on an
-ephemeral port and provides `wasi:http`, so no external process is
-needed:
+exercises append / read / verify-chain / segment / inclusion-proof /
+checkpoint signing. For the remote stack it launches the
+`secure-log-rpc-server.wasm` endpoint with `wasmtime serve` (a
+subprocess) and provides `wasi:http`, so no external setup is needed:
 
 ```bash
 cd verify
@@ -197,8 +212,9 @@ canonical event → per-entry hash chain → Merkle-sealed segments →
 
 - **Phase 1** — entries + per-stream hash chain.
 - **Phase 2** — Merkle-sealed segments + inclusion proofs.
-- **Phase 3** — checkpoint signatures (via `CheckpointSigner` trait;
-  consumers wire in TPM, HSM, file-based Ed25519, etc.).
+- **Phase 3** — checkpoint signatures, signed in-graph via a composed
+  `keys:keystore/signer` (software or softhsm/PKCS#11), verified by
+  algorithm (ed25519 / ecdsa-p256 / rsa-pss-sha256).
 - **Phase 4** — anti-rollback head file + witness submission.
 - **Phase 5** — optional payload envelope encryption with
   per-segment AEAD keys.
@@ -208,18 +224,25 @@ implementations in other languages must conform to it.
 
 ## Quick start
 
-```rust,no_run
-use secure_log::{CborEncoder, NativeSecureLog, SecureLog};
-use secure_log_sqlite::SqliteSecureLogStore;
+secure-log runs as a composed wasm component — storage and the signing
+keystore are plugged in at composition time, and the core logic (the
+`secure-log` crate, compiled into `secure-log-component`) never runs
+host-side.
 
-let store = SqliteSecureLogStore::open("audit.db")?;
-let encoder = Box::new(CborEncoder::new());
-let log = NativeSecureLog::new(Box::new(store), encoder);
+```bash
+# 1. Build + compose the stacks (storage + keystore).
+./scripts/build-components.sh
 
-log.append("default", "user.login", "info", "authd", b"{\"u\":\"alice\"}")?;
-log.verify_chain("default", 1, 1)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# 2. Run one end-to-end under wasmtime: append, verify the chain, close
+#    a segment, build an inclusion proof, and sign + verify a checkpoint
+#    — all inside the wasm graph.
+cd verify
+cargo run --release -- ../dist/secure-log-sqlite.wasm ":memory:"
 ```
+
+A component implementing the `secure-log:log` world (see `wit/`) is a
+drop-in for the whole subsystem; embedders host it with any wasi:p2
+runtime (wasmtime, `wasmtime serve`, jco, …).
 
 ## License
 

@@ -8,13 +8,12 @@ publish = false
 # component under wasmtime and exercises the exported secure-log:log
 # interface end-to-end. Excluded from the component workspace.
 #
-# For the remote backend it also embeds the reference JSON-RPC server
-# (secure-log-rpc-server) and provides wasi:http, so the composed
-# secure-log-remote.wasm can be driven without any external process.
+# For the remote backend it runs the composed secure-log-rpc-server.wasm
+# endpoint under `wasmtime serve` (subprocess) and provides wasi:http, so
+# the remote client stack can be driven without any external setup.
 
 [dependencies]
 wasmtime = "44"
 wasmtime-wasi = "44"
 wasmtime-wasi-http = "44"
 anyhow = "1"
-secure-log-rpc-server = { path = "../crates/secure-log-rpc-server" }

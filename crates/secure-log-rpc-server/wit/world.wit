@@ -1,0 +1,11 @@
+package secure-log:rpc-server@0.1.0;
+
+// The remote store's endpoint, as a wasi:http guest. Receives JSON-RPC
+// store calls over HTTP and dispatches them to the imported store.
+// Compose with a store provider (store-sqlite) and run with
+// `wasmtime serve`. wasi:http handlers are request-scoped, so the store
+// is file-backed and opened per request from SECURE_LOG_STORE_CONFIG.
+world server {
+    import secure-log:log/store@0.1.0;
+    export wasi:http/incoming-handler@0.2.6;
+}

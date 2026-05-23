@@ -4,23 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Reference JSON-RPC server for the secure-log remote store: terminates the wire protocol and dispatches the 23 store ops to a native SecureLogStore."
-
-# Native host-side endpoint for the `secure-log-store-remote` provider.
-# Dependency-light: a small std-only HTTP/1.1 loop, no async runtime.
+description = "Remote-store endpoint as a wasi:http guest component: dispatches JSON-RPC store calls to an imported secure-log:log/store. Compose with a store provider and run with `wasmtime serve`."
 
 [lib]
-name = "secure_log_rpc_server"
-path = "src/lib.rs"
-
-[[bin]]
-name = "secure-log-rpc-server"
-path = "src/main.rs"
+crate-type = ["cdylib"]
 
 [dependencies]
-secure-log = { workspace = true }
-secure-log-sqlite = { workspace = true }
+wit-bindgen = { workspace = true }
 secure-log-rpc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = "1"

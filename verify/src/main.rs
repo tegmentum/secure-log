@@ -5,12 +5,69 @@
 //! Usage: secure-log-verify [path-to-composed.wasm]
 //! Default: ../dist/secure-log-sqlite.wasm
 
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
 use anyhow::Result;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
 use wasmtime_wasi_http::WasiHttpCtx;
+
+/// Holds the `wasmtime serve` subprocess that backs the remote stack and
+/// kills it on drop.
+struct RpcServer(Child);
+impl Drop for RpcServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawn the composed remote endpoint (`secure-log-rpc-server.wasm`) under
+/// `wasmtime serve`, returning the guard + its URL. Returns `None` if the
+/// artifact isn't built — the non-remote stacks don't need it.
+fn spawn_rpc_server() -> Option<(RpcServer, String)> {
+    let artifact = "../dist/secure-log-rpc-server.wasm";
+    if !std::path::Path::new(artifact).exists() {
+        return None;
+    }
+    let port = TcpListener::bind("127.0.0.1:0")
+        .ok()?
+        .local_addr()
+        .ok()?
+        .port();
+    let data = std::env::temp_dir().join(format!("secure-log-verify-rpc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).ok()?;
+    let child = Command::new("wasmtime")
+        .args([
+            "serve",
+            "-S",
+            "cli",
+            "--addr",
+            &format!("127.0.0.1:{port}"),
+            "--dir",
+            &format!("{}::/data", data.display()),
+            "--env",
+            "SECURE_LOG_STORE_CONFIG=/data/secure-log.db",
+            artifact,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Wait for the listener to come up.
+    for _ in 0..200 {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Some((RpcServer(child), format!("http://127.0.0.1:{port}")))
+}
 
 wasmtime::component::bindgen!({
     path: "wit",
@@ -84,12 +141,19 @@ fn main() -> Result<()> {
     // pkcs11:util pin-provider for the softhsm-backed pkcs11 stack.
     pkcs11::util::util::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |s| s)?;
 
-    // Embed the reference JSON-RPC server on an ephemeral port so the
-    // remote backend has an endpoint to talk to. Unused (but harmless)
-    // for the sqlite/file backends.
-    let (rpc_addr, _rpc_thread) = secure_log_rpc_server::spawn("127.0.0.1:0")?;
-    let rpc_url = format!("http://{rpc_addr}");
-    println!("embedded rpc server at {rpc_url}");
+    // Run the composed remote endpoint (a wasi:http guest) under
+    // `wasmtime serve` so the remote backend has somewhere to talk to.
+    // Unused (but harmless) for the sqlite/file backends. The guard kills
+    // the subprocess when it drops at the end of main.
+    let rpc = spawn_rpc_server();
+    let rpc_url = rpc
+        .as_ref()
+        .map(|(_, url)| url.clone())
+        .unwrap_or_default();
+    if let Some((_, url)) = &rpc {
+        println!("rpc-server (wasmtime serve) at {url}");
+    }
+    let _rpc_guard = rpc;
 
     let mut wasi = WasiCtxBuilder::new();
     wasi.inherit_stdio()

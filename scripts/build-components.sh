@@ -9,6 +9,8 @@
 #   secure-log-file.wasm          core + store-file + software keystore
 #   secure-log-remote.wasm        core + store-remote + transport-http + software keystore
 #   secure-log-sqlite-pkcs11.wasm core + store-sqlite + sqlite + softhsm keystore
+#   secure-log-rpc-server.wasm    rpc-server + store-sqlite + sqlite
+#                                 (the remote endpoint; `wasmtime serve` it)
 #
 # The sqlite stack embeds the prebuilt sqlite:wasm component (SQLITE_WASM).
 # The pkcs11 stack embeds the composed keys:keystore softhsm component
@@ -37,12 +39,18 @@ do
     ( cd "crates/$crate" && cargo component build --release --target wasm32-wasip2 )
 done
 
+# secure-log-rpc-server uses wit_bindgen::generate! (scans wit/deps), so it
+# builds with plain cargo + the wasip2 component linker, not cargo-component.
+echo "    - secure-log-rpc-server"
+cargo build --release --target wasm32-wasip2 -p secure-log-rpc-server
+
 CORE="$TARGET/secure_log_component.wasm"
 STORE_SQLITE="$TARGET/secure_log_store_sqlite.wasm"
 STORE_FILE="$TARGET/secure_log_store_file.wasm"
 STORE_REMOTE="$TARGET/secure_log_store_remote.wasm"
 TRANSPORT_HTTP="$TARGET/secure_log_transport_http.wasm"
 KEYSTORE_SW="$TARGET/secure_log_keystore_software.wasm"
+RPC_SERVER="$TARGET/secure_log_rpc_server.wasm"
 
 # Pre-plug the sqlite engine into the sqlite store provider (reused by the
 # plain and pkcs11 sqlite stacks).
@@ -63,6 +71,16 @@ fi
 echo "==> Composing file stack (+ software keystore)"
 wac plug --plug "$KEYSTORE_SW" --plug "$STORE_FILE" "$CORE" -o "$DIST/secure-log-file.wasm"
 echo "    -> dist/secure-log-file.wasm"
+
+echo "==> Composing remote-store endpoint (rpc-server + store-sqlite)"
+if [[ -n "$SQLITE_STORE" ]]; then
+    # The server imports the store; plug the sqlite store stack into it.
+    wac plug --plug "$SQLITE_STORE" "$RPC_SERVER" -o "$DIST/secure-log-rpc-server.wasm"
+    echo "    -> dist/secure-log-rpc-server.wasm (exports wasi:http/incoming-handler;"
+    echo "       run with: wasmtime serve dist/secure-log-rpc-server.wasm)"
+else
+    echo "    !! sqlite:wasm not found; skipping rpc-server endpoint."
+fi
 
 echo "==> Composing remote stack (store-remote + transport-http + software keystore)"
 wac plug --plug "$TRANSPORT_HTTP" "$STORE_REMOTE" -o "$DIST/.store-remote.plugged.wasm"
