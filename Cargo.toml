@@ -10,7 +10,6 @@ members = [
     "crates/secure-log-store-file",
     "crates/secure-log-store-remote",
     "crates/secure-log-transport-http",
-    "crates/secure-log-signer-keystore",
     "crates/secure-log-keystore-software",
 ]
 exclude = [

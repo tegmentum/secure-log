@@ -23,11 +23,6 @@ Native (build with `cargo build` / `cargo test`):
   the remote wire protocol and dispatches each of the 23 store ops to a
   native `SecureLogStore` (SQLite-backed). The host-side peer of the
   remote backend.
-- **`secure-log-signer-keystore`**: a `CheckpointSigner` backed by the
-  `keys:keystore/signer` interface (PKCS#11 via `softhsm-wasm`), driven
-  in-process with wasmtime. The ed25519 signing key never leaves the
-  wasm sandbox. Workspace member but not a default member (pulls
-  wasmtime); build/test with `-p secure-log-signer-keystore`.
 
 WASI Preview 2 components (build with
 `cargo component build --target wasm32-wasip2`):
@@ -167,15 +162,13 @@ cargo run --release -- ../dist/secure-log-sqlite-pkcs11.wasm ":memory:"
 ### Checkpoint signing (`keys:keystore`)
 
 Phase 3 signs each closed segment's checkpoint hash through a keystore
-that exposes `keys:keystore/signer`. The signing key never leaves the
-keystore; verification needs only the public key, so it dispatches on
-the key's algorithm — **ed25519**, **ecdsa-p256**, or
-**rsa-pss-sha256**. Two integration paths share this contract:
-
-**In-graph (component).** The core component imports
-`keys:keystore/signer` and exports a `checkpoint` interface; the
-keystore is composed into the stack via `wac plug`. Signing happens
-entirely inside the wasm graph:
+that exposes `keys:keystore/signer`. Signing is **in-graph**: the core
+component imports `keys:keystore/signer` and exports a `checkpoint`
+interface, and a keystore provider is composed into the stack via
+`wac plug`. The signing key never leaves the keystore (for softhsm, it
+never leaves the wasm sandbox); verification needs only the public key,
+so it dispatches on the key's algorithm — **ed25519**, **ecdsa-p256**,
+or **rsa-pss-sha256**.
 
 ```text
 checkpoint.sign-segment(identity, segment-id)   (secure-log-component)
@@ -184,44 +177,16 @@ checkpoint.sign-segment(identity, segment-id)   (secure-log-component)
        └─ softhsm: keystore-pkcs11 -> pkcs11:* -> softhsm:pkcs11
 ```
 
-**Host-side (native).** `secure-log-signer-keystore` implements the
-`CheckpointSigner` trait by driving the composed `keystore-softhsm.wasm`
-in-process with wasmtime — for daemons/CLIs using `NativeSecureLog`
-directly. The key stays in the softhsm sandbox; verification is local
-(`ed25519-dalek` / `p256` / `rsa`).
+The softhsm keystore (`keystore-softhsm.wasm`) and its SoftHSM config
+come from the [`softhsm-wasm`](../softhsm-wasm) project; the pkcs11
+stack composes it guest-side. The verify harness above exercises
+`sign-segment` + `verify-checkpoint-chain` for every stack.
 
-```rust,no_run
-use secure_log::{CborEncoder, NativeSecureLog};
-use secure_log_signer_keystore::{KeystoreSigner, KeystoreSignerConfig};
-use secure_log_sqlite::SqliteSecureLogStore;
-
-let signer = KeystoreSigner::open(&KeystoreSignerConfig {
-    component_path: "keystore-softhsm.wasm".into(),
-    conf_path: "softhsm2-wasi.conf".into(),
-    token_dir: ".secure-log/pkcs11".into(),
-    pin: "1234".into(),
-    so_pin: "1234".into(),
-})?;
-let log = NativeSecureLog::new(
-    Box::new(SqliteSecureLogStore::open("audit.db")?),
-    Box::new(CborEncoder::new()),
-);
-// ... append entries ...
-let seg = secure_log::SecureLog::close_segment(&log, "default")?;
-log.sign_segment(&signer, "attest", seg.segment_id)?;     // key in the HSM
-log.verify_checkpoint_chain(&signer, "default")?;          // ed25519, local
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-The composed `keystore-softhsm.wasm` and SoftHSM config come from the
-[`softhsm-wasm`](../softhsm-wasm) project. The end-to-end test points at
-them via `SECURE_LOG_KEYSTORE_WASM` / `SECURE_LOG_SOFTHSM_CONF` (and
-falls back to their default `~/git/softhsm-wasm/...` locations), and
-skips when they are absent:
-
-```bash
-cargo test -p secure-log-signer-keystore
-```
+Native consumers that embed `NativeSecureLog` as a library can still
+plug their own `CheckpointSigner` (the trait remains the seam) — for a
+backend that genuinely cannot be a wasm guest, e.g. a hardware HSM via
+native PKCS#11, a TPM, or a cloud KMS. A wasm keystore like softhsm
+belongs in the graph instead.
 
 ## Architecture
 
