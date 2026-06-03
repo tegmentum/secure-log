@@ -34,3 +34,7 @@ world = "secure-log-core-signing"
 [package.metadata.component.target.dependencies]
 "secure-log:log" = { path = "../../wit" }
 "keys:keystore" = { path = "wit-deps/keys-keystore" }
+# Vendored from ~/git/log-wit @ v0.1.0. Re-vendor by copying
+# ~/git/log-wit/wit/logger.wit into wit-deps/tegmentum-log/ and
+# prepending the `package tegmentum:log@0.1.0;` declaration.
+"tegmentum:log" = { path = "wit-deps/tegmentum-log" }

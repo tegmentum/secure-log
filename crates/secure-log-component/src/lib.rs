@@ -724,4 +724,105 @@ impl checkpoint::Guest for Component {
     }
 }
 
+// ---------------------------------------------------------------------
+// Exported `tegmentum:log/logger` interface — the generic log-wit
+// adapter. Maps a write-only `log(entry)` call onto an audit-graded
+// `secure-log:log/log.append(...)` so consumers of the generic
+// contract (Python's _log_cap, Rust log-crate adapter, JS console
+// redirect) get hash-chained, Merkle-sealed delivery without knowing
+// secure-log's richer surface.
+//
+// Mapping:
+//   entry.severity (enum) → SecureLog severity string ("info", "warn", …)
+//   entry.category        → SecureLog stream_id (defaults to "default")
+//   entry.producer        → SecureLog producer (passed through verbatim)
+//   entry.message         → JSON-wrapped payload when fields are present:
+//                             {"message":"...","fields":{...}}
+//                           plain message bytes otherwise.
+//   entry.timestamp       → consumed by Component::append impl; this
+//                           tegmentum:log adapter doesn't surface it
+//                           explicitly because secure-log's append
+//                           uses the host's clock for audit reasons
+//                           (deterministic order, no producer skew).
+// ---------------------------------------------------------------------
+
+use bindings::exports::tegmentum::log::logger as wlogger;
+
+fn severity_to_str(s: wlogger::Severity) -> &'static str {
+    match s {
+        wlogger::Severity::Emergency => "emerg",
+        wlogger::Severity::Alert     => "alert",
+        wlogger::Severity::Critical  => "crit",
+        wlogger::Severity::Error     => "err",
+        wlogger::Severity::Warning   => "warning",
+        wlogger::Severity::Notice    => "notice",
+        wlogger::Severity::Info      => "info",
+        wlogger::Severity::Debug     => "debug",
+    }
+}
+
+/// Encode the entry's payload. Plain message bytes if there are no
+/// structured fields; an inline JSON object `{"message":..,"fields":..}`
+/// otherwise. (The secure-log core's `append` doesn't take an
+/// encoding parameter — it tags every payload uniformly per the
+/// canonical encoder. Adapter consumers that need to discriminate
+/// at read time should sniff the first byte / try-decode as JSON.)
+fn encode_payload(message: &str, fields: &[wlogger::Field]) -> Vec<u8> {
+    if fields.is_empty() {
+        return message.as_bytes().to_vec();
+    }
+    let mut s = String::from("{\"message\":");
+    json_str(&mut s, message);
+    s.push_str(",\"fields\":{");
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        json_str(&mut s, &f.key);
+        s.push(':');
+        json_str(&mut s, &f.value);
+    }
+    s.push_str("}}");
+    s.into_bytes()
+}
+
+fn json_str(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c    => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+impl wlogger::Guest for Component {
+    fn log(rec: wlogger::Entry) {
+        let stream_id = if rec.category.is_empty() { "default".to_string() } else { rec.category };
+        let severity = severity_to_str(rec.severity);
+        let payload = encode_payload(&rec.message, &rec.fields);
+        // Best-effort: a write-only logger drops on backend error.
+        // Consumers that need delivery guarantees use the richer
+        // secure-log:log/log.append directly and check the result.
+        let _ = with_log(|log| {
+            log.append(&stream_id, "log", severity, &rec.producer, &payload)
+        });
+        let _ = rec.timestamp_rfc3339;  // consumed; see module-level mapping doc
+    }
+
+    fn flush() {
+        // Append is synchronous in NativeSecureLog; nothing buffered to flush.
+    }
+
+    fn backend_name() -> String {
+        "secure-log:v1".to_string()
+    }
+}
+
 bindings::export!(Component with_types_in bindings);

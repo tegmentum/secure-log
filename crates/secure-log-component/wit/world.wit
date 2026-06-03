@@ -3,11 +3,18 @@ package secure-log:core-signing@0.1.0;
 // The secure-log core, with in-graph checkpoint signing.
 //
 // Imports persistence (`secure-log:log/store`) and a keystore
-// (`keys:keystore/signer`); exports the encoder, the log, and the
-// checkpoint signing interface. Compose with a store provider and a
-// keystore provider via `wac plug`. The keystore import is declared
-// here (not in the shared secure-log:log package) so storage-only
-// providers are unaffected.
+// (`keys:keystore/signer`); exports the encoder, the log, the
+// checkpoint signing interface, and the generic write-only logger
+// adapter (`tegmentum:log/logger`). Compose with a store provider
+// and a keystore provider via `wac plug`. The keystore import is
+// declared here (not in the shared secure-log:log package) so
+// storage-only providers are unaffected.
+//
+// The tegmentum:log export turns this component into a drop-in
+// "secure logging" sink for the generic log-wit contract: any
+// consumer of `tegmentum:log/logger` (Python's _log_cap, Rust's
+// log-crate adapter, JS console redirect) gets audit-graded
+// hash-chained, Merkle-sealed delivery via the same call.
 world secure-log-core-signing {
     import secure-log:log/store@0.1.0;
     import keys:keystore/signer;
@@ -15,4 +22,5 @@ world secure-log-core-signing {
     export secure-log:log/encoder@0.1.0;
     export secure-log:log/log@0.1.0;
     export secure-log:log/checkpoint@0.1.0;
+    export tegmentum:log/logger@0.1.0;
 }

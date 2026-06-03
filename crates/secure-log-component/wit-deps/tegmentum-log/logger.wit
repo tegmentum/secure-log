@@ -1,0 +1,103 @@
+// Vendored from ~/git/log-wit @ 0.1.0 — DO NOT EDIT IN PLACE.
+// Update the source repo and re-vendor.
+
+package tegmentum:log@0.1.0;
+
+/// log-wit — generic logging contract (v0.1.0).
+///
+/// One write-only `logger` interface that backends (stderr forwarder, UDP
+/// RFC 3164 syslog forwarder, secure-log audit chain, ELK/Loki/Splunk
+/// pushers, etc.) export and consumers (Python's syslog cap, Rust's
+/// `log` crate adapter, JS console-redirect, etc.) import.
+///
+/// Scope discipline:
+///   - This is the *transport* contract. Filtering by severity / category
+///     is the *consumer's* responsibility (matches POSIX syslog mask
+///     semantics, matches `log::set_max_level`, matches Python's
+///     `logging.Logger.setLevel`).
+///   - Backends MAY drop records they can't deliver; `log` is fire-and-
+///     forget. Consumers that need delivery guarantees should layer them
+///     above this contract (queue + retry / WAL / etc.).
+///   - Backends MAY add their own metadata (process id, host, receive
+///     timestamp). Consumers SHOULD provide what they know.
+///
+/// What's deliberately NOT here in v0.1:
+///   - Read / query side. Audit-log backends (secure-log) expose those
+///     via their own richer surface; the generic logger is write-only.
+///   - Typed structured-field values. v0.1 uses string-pair fields; if a
+///     consumer needs typed values it can JSON-encode them in the string
+///     and the backend can decode. v0.2 may add typed values once a
+///     real consumer demands them.
+///   - Open/close lifecycle. Logging is process-lifetime; backends
+///     manage their own state.
+
+interface logger {
+    /// Severity, RFC 5424 / POSIX syslog order. Lower = more urgent.
+    enum severity {
+        /// 0 — system is unusable.
+        emergency,
+        /// 1 — action must be taken immediately.
+        alert,
+        /// 2 — critical conditions.
+        critical,
+        /// 3 — error conditions.
+        error,
+        /// 4 — warning conditions.
+        warning,
+        /// 5 — normal but significant condition.
+        notice,
+        /// 6 — informational.
+        info,
+        /// 7 — debug-level messages.
+        debug,
+    }
+
+    /// One structured key/value attached to a record. Value is a string
+    /// for v0.1 (see scope note); JSON-encode complex values consumer-
+    /// side if you need them.
+    record field {
+        key:   string,
+        value: string,
+    }
+
+    /// A log record.
+    record entry {
+        /// Severity (see enum).
+        severity: severity,
+
+        /// Logical category / facility. Conventionally a dotted name
+        /// like "auth", "http.request", "db.query", "python.requests".
+        /// POSIX syslog facilities (LOG_USER, LOG_MAIL, etc.) map onto
+        /// strings of the form "syslog.<facility>".
+        category: string,
+
+        /// Producer identity. Conventionally the program/service name
+        /// (POSIX syslog's `ident`, structlog's logger name). May be
+        /// empty if the backend doesn't need it.
+        producer: string,
+
+        /// Human-readable message line. No trailing newline.
+        message: string,
+
+        /// Optional structured fields.
+        fields: list<field>,
+
+        /// RFC 3339 timestamp the producer assigns. Empty string lets
+        /// the backend stamp on receive. Backends MAY rewrite this in
+        /// their own storage (e.g. secure-log uses its own canonical
+        /// timestamp) but the wire shape is RFC 3339.
+        timestamp-rfc3339: string,
+    }
+
+    /// Emit one record. Fire-and-forget; backends MAY buffer.
+    log: func(rec: entry);
+
+    /// Flush any buffered records. Backends that write through (e.g.
+    /// stderr) treat this as a no-op.
+    flush: func();
+
+    /// Stable identifier for the backend instance, for diagnostics.
+    /// Examples: "stderr-v1", "udp-rfc3164-v1", "secure-log:v1",
+    /// "json-stdout-v1", "elk-v1".
+    backend-name: func() -> string;
+}
