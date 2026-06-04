@@ -13,7 +13,7 @@ publish = false
 # the remote client stack can be driven without any external setup.
 
 [dependencies]
-wasmtime = "44"
-wasmtime-wasi = "44"
-wasmtime-wasi-http = "44"
+wasmtime = "45"
+wasmtime-wasi = "45"
+wasmtime-wasi-http = "45"
 anyhow = "1"
