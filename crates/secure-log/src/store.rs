@@ -140,29 +140,18 @@ pub trait SecureLogStore: Send {
     ) -> anyhow::Result<Option<SecureLogSegmentRow>>;
 
     /// List segments for a stream, ordered by segment_id.
-    fn secure_log_segments_list(
-        &self,
-        stream_id: &str,
-    ) -> anyhow::Result<Vec<SecureLogSegmentRow>>;
+    fn secure_log_segments_list(&self, stream_id: &str)
+        -> anyhow::Result<Vec<SecureLogSegmentRow>>;
 
     /// Return the highest seqno already covered by a closed segment
     /// for the given stream, or None if the stream has no segments.
-    fn secure_log_segment_last_seqno(
-        &self,
-        stream_id: &str,
-    ) -> anyhow::Result<Option<u64>>;
+    fn secure_log_segment_last_seqno(&self, stream_id: &str) -> anyhow::Result<Option<u64>>;
 
     /// Return the seqnos belonging to a segment, ordered by leaf_index.
-    fn secure_log_segment_entry_seqnos(
-        &self,
-        segment_id: u64,
-    ) -> anyhow::Result<Vec<u64>>;
+    fn secure_log_segment_entry_seqnos(&self, segment_id: u64) -> anyhow::Result<Vec<u64>>;
 
     /// Find the segment a given seqno belongs to (if any).
-    fn secure_log_segment_for_seqno(
-        &self,
-        seqno: u64,
-    ) -> anyhow::Result<Option<u64>>;
+    fn secure_log_segment_for_seqno(&self, seqno: u64) -> anyhow::Result<Option<u64>>;
 
     /// Update a segment with a signature. Used by Phase 3. Returns
     /// an error if the segment does not exist.
@@ -181,10 +170,7 @@ pub trait SecureLogStore: Send {
     fn witness_log_insert(&self, row: &WitnessLogRow) -> anyhow::Result<u64>;
 
     /// Return the most recent witness receipt for a stream, if any.
-    fn witness_log_latest(
-        &self,
-        stream_id: &str,
-    ) -> anyhow::Result<Option<WitnessLogRow>>;
+    fn witness_log_latest(&self, stream_id: &str) -> anyhow::Result<Option<WitnessLogRow>>;
 
     /// Return all witness receipts for a stream, ordered by
     /// received_at (ascending). Used by replay/audit tooling.
@@ -211,10 +197,7 @@ pub trait SecureLogStore: Send {
     fn secure_log_stream_upsert(&self, row: &SecureLogStreamRow) -> anyhow::Result<()>;
 
     /// Look up a stream by name.
-    fn secure_log_stream_get(
-        &self,
-        name: &str,
-    ) -> anyhow::Result<Option<SecureLogStreamRow>>;
+    fn secure_log_stream_get(&self, name: &str) -> anyhow::Result<Option<SecureLogStreamRow>>;
 
     /// List all streams, ordered by name.
     fn secure_log_stream_list(&self) -> anyhow::Result<Vec<SecureLogStreamRow>>;

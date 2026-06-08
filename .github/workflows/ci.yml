@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The host-buildable crates: the core library, the SQLite store, and the RPC
+  # types (rlibs). The other workspace members are WASM component `cdylib`s
+  # (wit-bindgen) that only link on wasm32-wasip2 via cargo-component, so they
+  # are not part of this native job.
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libsqlite3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format (whole workspace)
+        run: cargo fmt --all --check
+
+      - name: Clippy (host crates, deny warnings)
+        run: cargo clippy -p secure-log -p secure-log-sqlite -p secure-log-rpc --all-targets -- -D warnings
+
+      - name: Build (host crates)
+        run: cargo build -p secure-log -p secure-log-sqlite -p secure-log-rpc --all-targets
+
+      - name: Test (host crates)
+        run: cargo test -p secure-log -p secure-log-sqlite -p secure-log-rpc

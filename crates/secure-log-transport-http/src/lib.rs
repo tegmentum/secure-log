@@ -18,9 +18,7 @@ mod bindings;
 
 use bindings::wasi::cli::environment::get_environment;
 use bindings::wasi::http::outgoing_handler;
-use bindings::wasi::http::types::{
-    Method, OutgoingBody, OutgoingRequest, RequestOptions, Scheme,
-};
+use bindings::wasi::http::types::{Method, OutgoingBody, OutgoingRequest, RequestOptions, Scheme};
 use bindings::wasi::io::streams::StreamError;
 
 use bindings::exports::secure_log::log::transport::Guest;

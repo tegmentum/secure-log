@@ -34,7 +34,9 @@ thread_local! {
 
 fn init_conn(config: &str) -> Result<(), String> {
     if config.is_empty() {
-        return Err("sqlite store: init config is empty; pass a database path or \":memory:\"".into());
+        return Err(
+            "sqlite store: init config is empty; pass a database path or \":memory:\"".into(),
+        );
     }
     let conn = if config == ":memory:" {
         sql::open_memory().map_err(dberr)?
@@ -57,7 +59,10 @@ fn with_conn<R>(f: impl FnOnce(&Connection) -> Result<R, String>) -> Result<R, S
 }
 
 fn dberr(e: sql::DatabaseError) -> String {
-    format!("sqlite error {} ({}): {}", e.code, e.extended_code, e.message)
+    format!(
+        "sqlite error {} ({}): {}",
+        e.code, e.extended_code, e.message
+    )
 }
 
 fn exec(conn: &Connection, sql_text: &str, params: &[Value]) -> Result<sql::ExecResult, String> {
@@ -329,8 +334,7 @@ fn to_witness_row(cols: &[Value]) -> Result<WitnessLogRow, String> {
     })
 }
 
-const WITNESS_COLS: &str =
-    "id, stream_id, segment_id, seq_start, seq_end, checkpoint_hash_hex, \
+const WITNESS_COLS: &str = "id, stream_id, segment_id, seq_start, seq_end, checkpoint_hash_hex, \
      signature_hex, signer_identity, received_at";
 
 fn one_aggregate(qr: &sql::QueryResult) -> Result<Option<u64>, String> {
@@ -415,7 +419,10 @@ impl Guest for Component {
                 ),
                 &[vt(&stream_id), vi(from_seqno), vi(to_seqno)],
             )?;
-            qr.rows.iter().map(|r| to_secure_log_row(&r.columns)).collect()
+            qr.rows
+                .iter()
+                .map(|r| to_secure_log_row(&r.columns))
+                .collect()
         })
     }
 
@@ -501,9 +508,7 @@ impl Guest for Component {
         with_conn(|conn| {
             let qr = query(
                 conn,
-                &format!(
-                    "SELECT {SEGMENT_COLS} FROM secure_log_segments WHERE segment_id = ?1"
-                ),
+                &format!("SELECT {SEGMENT_COLS} FROM secure_log_segments WHERE segment_id = ?1"),
                 &[vi(segment_id)],
             )?;
             match qr.rows.first() {
@@ -710,7 +715,11 @@ impl Guest for Component {
                     if keep_ids.contains(&id) {
                         continue;
                     }
-                    exec(conn, "DELETE FROM witness_log WHERE id = ?1", &[Value::Integer(id)])?;
+                    exec(
+                        conn,
+                        "DELETE FROM witness_log WHERE id = ?1",
+                        &[Value::Integer(id)],
+                    )?;
                     total += 1;
                 }
             }
@@ -744,9 +753,7 @@ impl Guest for Component {
         with_conn(|conn| {
             let qr = query(
                 conn,
-                &format!(
-                    "SELECT {STREAM_COLS} FROM secure_log_streams WHERE name = ?1"
-                ),
+                &format!("SELECT {STREAM_COLS} FROM secure_log_streams WHERE name = ?1"),
                 &[vt(&name)],
             )?;
             match qr.rows.first() {

@@ -112,8 +112,7 @@ impl NativeSecureLog {
         let Some(ref path) = self.head_file else {
             return Ok(None);
         };
-        let hf = HeadFile::load(path)
-            .map_err(|e| SecureLogError::Storage(e.to_string()))?;
+        let hf = HeadFile::load(path).map_err(|e| SecureLogError::Storage(e.to_string()))?;
         Ok(hf.get(stream_id).cloned())
     }
 
@@ -168,9 +167,9 @@ impl NativeSecureLog {
     /// *segment*-level key derived from the stream key. But the
     /// segment_id isn't assigned until `close_segment` runs. For
     /// Phase 5 we derive the segment key from the **current open
-    /// segment_id**, which is defined as `(last closed segment_id)
-    /// + 1`. If the log is later reorganized, the caller must
-    /// re-close with the same ordering.
+    /// segment_id**, which is defined as `(last closed segment_id) + 1`.
+    /// If the log is later reorganized, the caller must re-close with the
+    /// same ordering.
     pub fn append_encrypted(
         &self,
         stream_id: &str,
@@ -423,13 +422,8 @@ impl NativeSecureLog {
         // non-repeatable across restarts.
         let (session_id, boot_id) = self.session_and_boot_for_segment(&segment_info)?;
 
-        let fields = checkpoint::build_fields(
-            &segment_info,
-            prev_ckpt,
-            &boot_id,
-            &session_id,
-            ZERO_HASH,
-        );
+        let fields =
+            checkpoint::build_fields(&segment_info, prev_ckpt, &boot_id, &session_id, ZERO_HASH);
         let ckpt_hash = checkpoint::hash(self.encoder.as_ref(), &fields);
 
         let (signature, signer_identity) = signer
@@ -442,8 +436,8 @@ impl NativeSecureLog {
 
         // Anti-rollback: update the head file (if configured).
         if let Some(ref path) = self.head_file {
-            let mut hf = HeadFile::load(path)
-                .map_err(|e| SecureLogError::Storage(e.to_string()))?;
+            let mut hf =
+                HeadFile::load(path).map_err(|e| SecureLogError::Storage(e.to_string()))?;
             hf.version = HeadFile::VERSION;
             hf.upsert(HeadRecord {
                 stream_id: segment.stream_id.clone(),
@@ -490,10 +484,9 @@ impl NativeSecureLog {
             .signature
             .clone()
             .expect("filtered for signature above");
-        let signer_identity = segment
-            .signer_identity
-            .clone()
-            .ok_or_else(|| SecureLogError::Invalid("signed segment has no signer identity".into()))?;
+        let signer_identity = segment.signer_identity.clone().ok_or_else(|| {
+            SecureLogError::Invalid("signed segment has no signer identity".into())
+        })?;
 
         Ok(super::witness::WitnessSubmission {
             stream_id: segment.stream_id,
@@ -516,11 +509,9 @@ impl NativeSecureLog {
         &self,
         submission: &super::witness::WitnessSubmission,
     ) -> Result<bool, SecureLogError> {
-        let remote_hash = submission
-            .checkpoint_hash_hex
-            .clone();
-        let local_hash = self
-            .compute_checkpoint_hash_for(&submission.stream_id, submission.segment_id)?;
+        let remote_hash = submission.checkpoint_hash_hex.clone();
+        let local_hash =
+            self.compute_checkpoint_hash_for(&submission.stream_id, submission.segment_id)?;
         let local_hex = hex(&local_hash);
         if remote_hash == local_hex {
             return Ok(true);
@@ -555,10 +546,7 @@ impl NativeSecureLog {
             .store
             .secure_log_segments_list(stream_id)
             .map_err(|e| SecureLogError::Storage(e.to_string()))?;
-        let highest = db_segments
-            .last()
-            .and_then(|s| s.segment_id)
-            .unwrap_or(0);
+        let highest = db_segments.last().and_then(|s| s.segment_id).unwrap_or(0);
         if highest < record.segment_id {
             return Err(SecureLogError::ChainBroken {
                 seqno: record.seq_end,
@@ -570,9 +558,9 @@ impl NativeSecureLog {
         }
         // And the checkpoint hash must still compute to the same value.
         let computed = self.compute_checkpoint_hash_for(stream_id, record.segment_id)?;
-        let stored_hash = record.checkpoint_hash().ok_or_else(|| {
-            SecureLogError::Storage("head file hash is not 32 bytes".into())
-        })?;
+        let stored_hash = record
+            .checkpoint_hash()
+            .ok_or_else(|| SecureLogError::Storage("head file hash is not 32 bytes".into()))?;
         if computed != stored_hash {
             return Err(SecureLogError::ChainBroken {
                 seqno: record.seq_end,
@@ -618,13 +606,7 @@ impl NativeSecureLog {
         let info = segment_row_to_info(&segment)?;
         let prev_ckpt = self.previous_checkpoint_hash(&segment.stream_id, segment_id)?;
         let (session_id, boot_id) = self.session_and_boot_for_segment(&info)?;
-        let fields = checkpoint::build_fields(
-            &info,
-            prev_ckpt,
-            &boot_id,
-            &session_id,
-            ZERO_HASH,
-        );
+        let fields = checkpoint::build_fields(&info, prev_ckpt, &boot_id, &session_id, ZERO_HASH);
         let ckpt_hash = checkpoint::hash(self.encoder.as_ref(), &fields);
 
         let ok = signer
@@ -741,13 +723,7 @@ impl NativeSecureLog {
         let info = segment_row_to_info(&row)?;
         let prev_prev = self.previous_checkpoint_hash(stream_id, segment_id)?;
         let (session_id, boot_id) = self.session_and_boot_for_segment(&info)?;
-        let fields = checkpoint::build_fields(
-            &info,
-            prev_prev,
-            &boot_id,
-            &session_id,
-            ZERO_HASH,
-        );
+        let fields = checkpoint::build_fields(&info, prev_prev, &boot_id, &session_id, ZERO_HASH);
         Ok(checkpoint::hash(self.encoder.as_ref(), &fields))
     }
 
@@ -909,12 +885,7 @@ impl SecureLog for NativeSecureLog {
             .map_err(|e| SecureLogError::Storage(e.to_string()))
     }
 
-    fn verify_chain(
-        &self,
-        stream_id: &str,
-        from: u64,
-        to: u64,
-    ) -> Result<(), SecureLogError> {
+    fn verify_chain(&self, stream_id: &str, from: u64, to: u64) -> Result<(), SecureLogError> {
         if from > to {
             return Err(SecureLogError::Invalid(format!(
                 "verify_chain: from ({}) > to ({})",
@@ -967,10 +938,7 @@ impl SecureLog for NativeSecureLog {
                 .ok_or_else(|| SecureLogError::Storage("row has no seqno".into()))?;
 
             // Check prev_entry_hash linkage.
-            let stored_prev = digest_from_vec(
-                row.prev_entry_hash.clone(),
-                "row prev_entry_hash",
-            )?;
+            let stored_prev = digest_from_vec(row.prev_entry_hash.clone(), "row prev_entry_hash")?;
             if stored_prev != previous_entry_hash {
                 return Err(SecureLogError::ChainBroken {
                     seqno,
@@ -1061,9 +1029,9 @@ impl SecureLog for NativeSecureLog {
             .map_err(|e| SecureLogError::Storage(e.to_string()))?;
         let prev_checkpoint_hash: EntryDigest = match prev_segments.last() {
             Some(prev) => {
-                let prev_id = prev.segment_id.ok_or_else(|| {
-                    SecureLogError::Storage("segment row has no id".into())
-                })?;
+                let prev_id = prev
+                    .segment_id
+                    .ok_or_else(|| SecureLogError::Storage("segment row has no id".into()))?;
                 self.compute_checkpoint_hash_for(stream_id, prev_id)?
             }
             None => ZERO_HASH,
@@ -1145,8 +1113,7 @@ impl SecureLog for NativeSecureLog {
                 leaf_index = Some(i);
             }
         }
-        let leaf_index =
-            leaf_index.ok_or(SecureLogError::EntryNotFound(seqno))?;
+        let leaf_index = leaf_index.ok_or(SecureLogError::EntryNotFound(seqno))?;
         let entry_hash = leaves[leaf_index];
         let (root, path) = merkle::build_proof(&leaves, leaf_index);
 
@@ -1189,4 +1156,3 @@ type _ProofStepAlias = ProofStep;
 // Suppress the unused-const warning when phase 1 tests compile.
 #[allow(dead_code)]
 const _HASH_LEN_USED_BY_CONSUMERS: usize = HASH_LEN;
-

@@ -133,7 +133,8 @@ impl Model {
             Op::InsertSegment { segment, entries } => {
                 self.next_segment_id = self.next_segment_id.max(segment.segment_id + 1);
                 for (seqno, leaf) in entries {
-                    self.segment_entries.push((segment.segment_id, *seqno, *leaf));
+                    self.segment_entries
+                        .push((segment.segment_id, *seqno, *leaf));
                 }
                 self.segments.push(segment.clone());
             }
@@ -142,7 +143,11 @@ impl Model {
                 signature,
                 signer_identity,
             } => {
-                if let Some(s) = self.segments.iter_mut().find(|s| s.segment_id == *segment_id) {
+                if let Some(s) = self
+                    .segments
+                    .iter_mut()
+                    .find(|s| s.segment_id == *segment_id)
+                {
                     s.signature = Some(signature.clone());
                     s.signer_identity = Some(signer_identity.clone());
                 }
@@ -327,7 +332,10 @@ impl Guest for Component {
             .ok_or_else(|| "secure_log_insert requires row.seqno to be Some".to_string())?;
         with_model(|m| {
             if m.entries.iter().any(|r| r.seqno == seqno) {
-                return Err(format!("UNIQUE constraint failed: secure_log.seqno ({})", seqno));
+                return Err(format!(
+                    "UNIQUE constraint failed: secure_log.seqno ({})",
+                    seqno
+                ));
             }
             commit(
                 m,
@@ -367,7 +375,9 @@ impl Guest for Component {
             let mut rows: Vec<&FRow> = m
                 .entries
                 .iter()
-                .filter(|r| r.stream_id == stream_id && r.seqno >= from_seqno && r.seqno <= to_seqno)
+                .filter(|r| {
+                    r.stream_id == stream_id && r.seqno >= from_seqno && r.seqno <= to_seqno
+                })
                 .collect();
             rows.sort_by_key(|r| r.seqno);
             Ok(rows.into_iter().map(frow_to_w).collect())
@@ -434,8 +444,11 @@ impl Guest for Component {
 
     fn secure_log_segments_list(stream_id: String) -> Result<Vec<SecureLogSegmentRow>, String> {
         with_model(|m| {
-            let mut segs: Vec<&FSegment> =
-                m.segments.iter().filter(|s| s.stream_id == stream_id).collect();
+            let mut segs: Vec<&FSegment> = m
+                .segments
+                .iter()
+                .filter(|s| s.stream_id == stream_id)
+                .collect();
             segs.sort_by_key(|s| s.segment_id);
             Ok(segs.into_iter().map(fseg_to_w).collect())
         })
@@ -453,8 +466,11 @@ impl Guest for Component {
 
     fn secure_log_segment_entry_seqnos(segment_id: u64) -> Result<Vec<u64>, String> {
         with_model(|m| {
-            let mut rows: Vec<&(u64, u64, u64)> =
-                m.segment_entries.iter().filter(|(sid, _, _)| *sid == segment_id).collect();
+            let mut rows: Vec<&(u64, u64, u64)> = m
+                .segment_entries
+                .iter()
+                .filter(|(sid, _, _)| *sid == segment_id)
+                .collect();
             rows.sort_by_key(|(_, _, leaf)| *leaf);
             Ok(rows.into_iter().map(|(_, seqno, _)| *seqno).collect())
         })
@@ -522,8 +538,11 @@ impl Guest for Component {
 
     fn witness_log_list(stream_id: String) -> Result<Vec<WitnessLogRow>, String> {
         with_model(|m| {
-            let mut ws: Vec<&FWitness> =
-                m.witnesses.iter().filter(|w| w.stream_id == stream_id).collect();
+            let mut ws: Vec<&FWitness> = m
+                .witnesses
+                .iter()
+                .filter(|w| w.stream_id == stream_id)
+                .collect();
             ws.sort_by_key(|w| w.id);
             Ok(ws.into_iter().map(fwitness_to_w).collect())
         })
@@ -531,8 +550,7 @@ impl Guest for Component {
 
     fn witness_log_stream_ids() -> Result<Vec<String>, String> {
         with_model(|m| {
-            let mut ids: Vec<String> =
-                m.witnesses.iter().map(|w| w.stream_id.clone()).collect();
+            let mut ids: Vec<String> = m.witnesses.iter().map(|w| w.stream_id.clone()).collect();
             ids.sort();
             ids.dedup();
             Ok(ids)

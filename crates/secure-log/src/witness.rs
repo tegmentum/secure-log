@@ -217,8 +217,10 @@ mod tests {
 
     #[test]
     fn upsert_replaces_existing_stream_record() {
-        let mut hf = HeadFile::default();
-        hf.version = HeadFile::VERSION;
+        let mut hf = HeadFile {
+            version: HeadFile::VERSION,
+            ..Default::default()
+        };
         hf.upsert(HeadRecord {
             stream_id: "a".into(),
             segment_id: 1,

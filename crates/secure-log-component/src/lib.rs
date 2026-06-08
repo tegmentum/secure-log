@@ -26,8 +26,8 @@ use bindings::exports::secure_log::log::encoder::{
     self, CheckpointFields as WCheckpointFields, EntryFields as WEntryFields,
 };
 use bindings::exports::secure_log::log::log::{
-    self, AppendResult as WAppendResult, InclusionProof as WInclusionProof, ProofStep as WProofStep,
-    SegmentInfo as WSegmentInfo,
+    self, AppendResult as WAppendResult, InclusionProof as WInclusionProof,
+    ProofStep as WProofStep, SegmentInfo as WSegmentInfo,
 };
 // Imported keystore: the signing key lives in whatever provider is
 // composed in; only the handle + public key cross this boundary.
@@ -63,8 +63,7 @@ fn with_log<R>(f: impl FnOnce(&NativeSecureLog) -> R) -> R {
 // ---------------------------------------------------------------------
 
 fn digest_from_vec(v: Vec<u8>) -> Result<[u8; HASH_LEN], String> {
-    v.try_into()
-        .map_err(|_| "hash is not 32 bytes".to_string())
+    v.try_into().map_err(|_| "hash is not 32 bytes".to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -223,11 +222,10 @@ impl SecureLogStore for ImportedStore {
         wstore::secure_log_head(stream_id).map_err(ae)
     }
 
-    fn secure_log_last(
-        &self,
-        stream_id: &str,
-    ) -> anyhow::Result<Option<secure_log::SecureLogRow>> {
-        Ok(wstore::secure_log_last(stream_id).map_err(ae)?.map(row_from_w))
+    fn secure_log_last(&self, stream_id: &str) -> anyhow::Result<Option<secure_log::SecureLogRow>> {
+        Ok(wstore::secure_log_last(stream_id)
+            .map_err(ae)?
+            .map(row_from_w))
     }
 
     fn secure_log_segment_insert(
@@ -276,8 +274,7 @@ impl SecureLogStore for ImportedStore {
         signature: &[u8],
         signer_identity: &str,
     ) -> anyhow::Result<()> {
-        wstore::secure_log_segment_set_signature(segment_id, signature, signer_identity)
-            .map_err(ae)
+        wstore::secure_log_segment_set_signature(segment_id, signature, signer_identity).map_err(ae)
     }
 
     fn witness_log_insert(&self, row: &secure_log::WitnessLogRow) -> anyhow::Result<u64> {
@@ -293,10 +290,7 @@ impl SecureLogStore for ImportedStore {
             .map(witness_from_w))
     }
 
-    fn witness_log_list(
-        &self,
-        stream_id: &str,
-    ) -> anyhow::Result<Vec<secure_log::WitnessLogRow>> {
+    fn witness_log_list(&self, stream_id: &str) -> anyhow::Result<Vec<secure_log::WitnessLogRow>> {
         Ok(wstore::witness_log_list(stream_id)
             .map_err(ae)?
             .into_iter()
@@ -314,12 +308,9 @@ impl SecureLogStore for ImportedStore {
         keep_latest: Option<usize>,
         older_than_rfc3339: Option<&str>,
     ) -> anyhow::Result<usize> {
-        let n = wstore::witness_log_gc(
-            stream_id,
-            keep_latest.map(|k| k as u32),
-            older_than_rfc3339,
-        )
-        .map_err(ae)?;
+        let n =
+            wstore::witness_log_gc(stream_id, keep_latest.map(|k| k as u32), older_than_rfc3339)
+                .map_err(ae)?;
         Ok(n as usize)
     }
 
@@ -546,7 +537,10 @@ impl log::Guest for Component {
             .map_err(|e| e.to_string())
     }
 
-    fn verify_inclusion_proof(proof: WInclusionProof, expected_root: Vec<u8>) -> Result<(), String> {
+    fn verify_inclusion_proof(
+        proof: WInclusionProof,
+        expected_root: Vec<u8>,
+    ) -> Result<(), String> {
         let core_proof = proof_from_w(proof)?;
         let root = digest_from_vec(expected_root)?;
         secure_log::verify_inclusion_proof(&core_proof, &root).map_err(|e| e.to_string())
@@ -628,8 +622,9 @@ impl CheckpointSigner for ComponentSigner {
         message: &[u8],
         signature: &[u8],
     ) -> Result<bool, SignerError> {
-        let (algorithm, public_key) =
-            with_key(signer_identity, |ck| (ck.algorithm.clone(), ck.public_key.clone()))?;
+        let (algorithm, public_key) = with_key(signer_identity, |ck| {
+            (ck.algorithm.clone(), ck.public_key.clone())
+        })?;
         verify_signature(&algorithm, &public_key, message, signature)
     }
 }
@@ -654,7 +649,11 @@ fn verify_signature(
     }
 }
 
-fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, SignerError> {
+fn verify_ed25519(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, SignerError> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     let pk: [u8; 32] = public_key
         .try_into()
@@ -751,13 +750,13 @@ use bindings::exports::tegmentum::log::logger as wlogger;
 fn severity_to_str(s: wlogger::Severity) -> &'static str {
     match s {
         wlogger::Severity::Emergency => "emerg",
-        wlogger::Severity::Alert     => "alert",
-        wlogger::Severity::Critical  => "crit",
-        wlogger::Severity::Error     => "err",
-        wlogger::Severity::Warning   => "warning",
-        wlogger::Severity::Notice    => "notice",
-        wlogger::Severity::Info      => "info",
-        wlogger::Severity::Debug     => "debug",
+        wlogger::Severity::Alert => "alert",
+        wlogger::Severity::Critical => "crit",
+        wlogger::Severity::Error => "err",
+        wlogger::Severity::Warning => "warning",
+        wlogger::Severity::Notice => "notice",
+        wlogger::Severity::Info => "info",
+        wlogger::Severity::Debug => "debug",
     }
 }
 
@@ -790,13 +789,13 @@ fn json_str(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {
-            '"'  => out.push_str("\\\""),
+            '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c    => out.push(c),
+            c => out.push(c),
         }
     }
     out.push('"');
@@ -804,16 +803,18 @@ fn json_str(out: &mut String, s: &str) {
 
 impl wlogger::Guest for Component {
     fn log(rec: wlogger::Entry) {
-        let stream_id = if rec.category.is_empty() { "default".to_string() } else { rec.category };
+        let stream_id = if rec.category.is_empty() {
+            "default".to_string()
+        } else {
+            rec.category
+        };
         let severity = severity_to_str(rec.severity);
         let payload = encode_payload(&rec.message, &rec.fields);
         // Best-effort: a write-only logger drops on backend error.
         // Consumers that need delivery guarantees use the richer
         // secure-log:log/log.append directly and check the result.
-        let _ = with_log(|log| {
-            log.append(&stream_id, "log", severity, &rec.producer, &payload)
-        });
-        let _ = rec.timestamp_rfc3339;  // consumed; see module-level mapping doc
+        let _ = with_log(|log| log.append(&stream_id, "log", severity, &rec.producer, &payload));
+        let _ = rec.timestamp_rfc3339; // consumed; see module-level mapping doc
     }
 
     fn flush() {

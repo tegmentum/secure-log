@@ -129,10 +129,7 @@ impl WasmCanonicalEncoder {
         let name_str = match name_val {
             Val::String(s) => s,
             other => {
-                anyhow::bail!(
-                    "encoder.name() returned unexpected value: {:?}",
-                    other
-                )
+                anyhow::bail!("encoder.name() returned unexpected value: {:?}", other)
             }
         };
         let cached_name: &'static str = Box::leak(name_str.into_boxed_str());
@@ -189,7 +186,10 @@ impl CanonicalEncoder for WasmCanonicalEncoder {
 fn entry_to_val(fields: &EntryFields) -> Val {
     let fields_pairs = vec![
         ("version".to_string(), Val::U32(fields.version)),
-        ("stream-id".to_string(), Val::String(fields.stream_id.clone())),
+        (
+            "stream-id".to_string(),
+            Val::String(fields.stream_id.clone()),
+        ),
         (
             "session-id".to_string(),
             Val::String(fields.session_id.clone()),

@@ -55,10 +55,7 @@ fn hash_pair(left: &EntryDigest, right: &EntryDigest) -> EntryDigest {
 ///
 /// Returns the root alongside the proof path so callers can persist
 /// both atomically. Panics if `leaf_index` is out of bounds.
-pub fn build_proof(
-    leaves: &[EntryDigest],
-    leaf_index: usize,
-) -> (EntryDigest, Vec<ProofStep>) {
+pub fn build_proof(leaves: &[EntryDigest], leaf_index: usize) -> (EntryDigest, Vec<ProofStep>) {
     assert!(!leaves.is_empty(), "build_proof on empty leaves");
     assert!(
         leaf_index < leaves.len(),
@@ -72,7 +69,7 @@ pub fn build_proof(
     let mut index = leaf_index;
 
     while level.len() > 1 {
-        let is_left = index % 2 == 0;
+        let is_left = index.is_multiple_of(2);
         // The sibling is the other node in the pair containing `index`.
         // If `index` is the last element of an odd-length level, there
         // is no sibling and `index` is promoted unchanged.
@@ -94,8 +91,8 @@ pub fn build_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verify_inclusion_proof;
     use crate::model::InclusionProof;
+    use crate::verify_inclusion_proof;
 
     fn h(n: u8) -> EntryDigest {
         sha256(&[n])

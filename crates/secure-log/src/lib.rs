@@ -98,12 +98,7 @@ pub trait SecureLog: Send {
     ///
     /// Returns `Ok(())` if every link resolves, or an error identifying
     /// the first broken link.
-    fn verify_chain(
-        &self,
-        stream_id: &str,
-        from: u64,
-        to: u64,
-    ) -> Result<(), SecureLogError>;
+    fn verify_chain(&self, stream_id: &str, from: u64, to: u64) -> Result<(), SecureLogError>;
 
     /// Close the current open segment and build a Merkle root.
     fn close_segment(&self, stream_id: &str) -> Result<SegmentInfo, SecureLogError>;

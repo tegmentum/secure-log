@@ -107,7 +107,10 @@ fn dispatch(method: &str, params: Value) -> Result<String, String> {
         // Phase 2: segments
         k::SECURE_LOG_SEGMENT_INSERT => {
             let (seg, entries): (WireSegment, Vec<(u64, u64)>) = decode(params)?;
-            enc(&wstore::secure_log_segment_insert(&to_store_seg(seg), &entries)?)
+            enc(&wstore::secure_log_segment_insert(
+                &to_store_seg(seg),
+                &entries,
+            )?)
         }
         k::SECURE_LOG_SEGMENT_GET => {
             let (segment_id,): (u64,) = decode(params)?;
@@ -155,8 +158,11 @@ fn dispatch(method: &str, params: Value) -> Result<String, String> {
         }
         k::WITNESS_LOG_STREAM_IDS => enc(&wstore::witness_log_stream_ids()?),
         k::WITNESS_LOG_GC => {
-            let (stream_id, keep_latest, older_than): (Option<String>, Option<u32>, Option<String>) =
-                decode(params)?;
+            let (stream_id, keep_latest, older_than): (
+                Option<String>,
+                Option<u32>,
+                Option<String>,
+            ) = decode(params)?;
             enc(&wstore::witness_log_gc(
                 stream_id.as_deref(),
                 keep_latest,

@@ -248,7 +248,11 @@ impl SecureLogStore for SqliteSecureLogStore {
                  VALUES (?1, ?2, ?3)",
             )?;
             for (seqno, leaf_index) in entries {
-                stmt.execute(params![segment_id as i64, *seqno as i64, *leaf_index as i64])?;
+                stmt.execute(params![
+                    segment_id as i64,
+                    *seqno as i64,
+                    *leaf_index as i64
+                ])?;
             }
         }
         tx.commit()?;
@@ -465,10 +469,8 @@ impl SecureLogStore for SqliteSecureLogStore {
                 if keep_ids.contains(&id) {
                     continue;
                 }
-                self.conn.execute(
-                    "DELETE FROM witness_log WHERE id = ?1",
-                    params![id],
-                )?;
+                self.conn
+                    .execute("DELETE FROM witness_log WHERE id = ?1", params![id])?;
                 total_deleted += 1;
             }
         }

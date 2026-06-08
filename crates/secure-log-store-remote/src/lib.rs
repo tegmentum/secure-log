@@ -291,7 +291,10 @@ impl Guest for Component {
         name: String,
         deprecated_at_rfc3339: String,
     ) -> Result<(), String> {
-        call(m::SECURE_LOG_STREAM_DEPRECATE, &(name, deprecated_at_rfc3339))
+        call(
+            m::SECURE_LOG_STREAM_DEPRECATE,
+            &(name, deprecated_at_rfc3339),
+        )
     }
 }
 

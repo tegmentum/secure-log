@@ -183,7 +183,9 @@ mod tests {
         let bytes = enc.encode_entry(&sample_entry());
         // The payload is 5 bytes ("hello"), so its canonical CBOR
         // header is 0x45 (major type 2, short length 5). Grep for it.
-        let found = bytes.windows(6).any(|w| w == [0x45, b'h', b'e', b'l', b'l', b'o']);
+        let found = bytes
+            .windows(6)
+            .any(|w| w == [0x45, b'h', b'e', b'l', b'l', b'o']);
         assert!(
             found,
             "expected byte-string header 0x45 before payload, got {:02x?}",

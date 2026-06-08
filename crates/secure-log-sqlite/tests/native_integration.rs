@@ -68,8 +68,14 @@ fn second_entry_chains_to_first() {
 fn chain_verifies_over_multiple_entries() {
     let log = new_log();
     for i in 0..10 {
-        log.append("default", "tick", "info", "t", format!("n={}", i).as_bytes())
-            .unwrap();
+        log.append(
+            "default",
+            "tick",
+            "info",
+            "t",
+            format!("n={}", i).as_bytes(),
+        )
+        .unwrap();
     }
     log.verify_chain("default", 1, 10).unwrap();
 }
@@ -245,8 +251,10 @@ fn check_rollback_detects_missing_segment() {
 
     let dir = tempdir().unwrap();
     let head_path = dir.path().join("heads.json");
-    let mut hf = HeadFile::default();
-    hf.version = HeadFile::VERSION;
+    let mut hf = HeadFile {
+        version: HeadFile::VERSION,
+        ..Default::default()
+    };
     hf.upsert(HeadRecord {
         stream_id: "default".into(),
         segment_id: 42,
@@ -270,9 +278,7 @@ fn verify_checkpoint_chain_rejects_unsigned() {
         log.append("default", "e", "info", "t", b"x").unwrap();
     }
     log.close_segment("default").unwrap();
-    let err = log
-        .verify_checkpoint_chain(&signer, "default")
-        .unwrap_err();
+    let err = log.verify_checkpoint_chain(&signer, "default").unwrap_err();
     assert!(matches!(err, SecureLogError::Invalid(_)));
 }
 

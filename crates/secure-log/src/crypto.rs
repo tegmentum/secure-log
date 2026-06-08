@@ -120,7 +120,9 @@ impl SecretKey {
 
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SecretKey").field("bytes", &"<redacted>").finish()
+        f.debug_struct("SecretKey")
+            .field("bytes", &"<redacted>")
+            .finish()
     }
 }
 
@@ -227,11 +229,7 @@ pub struct SealedPayload {
 
 impl SealedPayload {
     /// Encrypt `plaintext` under `key` with random nonce and AAD.
-    pub fn seal(
-        key: &SecretKey,
-        aad: &[u8],
-        plaintext: &[u8],
-    ) -> Result<Self, String> {
+    pub fn seal(key: &SecretKey, aad: &[u8], plaintext: &[u8]) -> Result<Self, String> {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
         let mut nonce_bytes = [0u8; NONCE_LEN];
         rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
@@ -252,28 +250,15 @@ impl SealedPayload {
     }
 
     /// Decrypt back to plaintext.
-    pub fn open(
-        bytes: &[u8],
-        key: &SecretKey,
-        aad: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    pub fn open(bytes: &[u8], key: &SecretKey, aad: &[u8]) -> Result<Vec<u8>, String> {
         if bytes.len() < NONCE_LEN + 16 {
-            return Err(format!(
-                "sealed payload too short: {} bytes",
-                bytes.len()
-            ));
+            return Err(format!("sealed payload too short: {} bytes", bytes.len()));
         }
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
         let nonce = Nonce::from_slice(&bytes[..NONCE_LEN]);
         let ct = &bytes[NONCE_LEN..];
         cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: ct,
-                    aad,
-                },
-            )
+            .decrypt(nonce, Payload { msg: ct, aad })
             .map_err(|e| format!("aead open failed: {}", e))
     }
 }
@@ -336,8 +321,7 @@ mod tests {
         let master = SecretKey::new([7u8; 32]);
         let public = derive_stream_key(&master, "x", ConfidentialityTier::Public);
         let protected = derive_stream_key(&master, "x", ConfidentialityTier::Protected);
-        let restricted =
-            derive_stream_key(&master, "x", ConfidentialityTier::HighlyRestricted);
+        let restricted = derive_stream_key(&master, "x", ConfidentialityTier::HighlyRestricted);
         assert_ne!(public.as_bytes(), protected.as_bytes());
         assert_ne!(protected.as_bytes(), restricted.as_bytes());
         assert_ne!(public.as_bytes(), restricted.as_bytes());
@@ -353,18 +337,11 @@ mod tests {
         let sealed = SealedPayload::seal(&seg, aad_ok.as_bytes(), b"msg").unwrap();
 
         let aad_wrong_tier = aead_aad("s", ConfidentialityTier::Public, 1);
-        assert!(
-            SealedPayload::open(&sealed.bytes, &seg, aad_wrong_tier.as_bytes()).is_err()
-        );
+        assert!(SealedPayload::open(&sealed.bytes, &seg, aad_wrong_tier.as_bytes()).is_err());
         let aad_wrong_seg = aead_aad("s", ConfidentialityTier::Protected, 2);
-        assert!(
-            SealedPayload::open(&sealed.bytes, &seg, aad_wrong_seg.as_bytes()).is_err()
-        );
+        assert!(SealedPayload::open(&sealed.bytes, &seg, aad_wrong_seg.as_bytes()).is_err());
         let aad_wrong_stream = aead_aad("t", ConfidentialityTier::Protected, 1);
-        assert!(
-            SealedPayload::open(&sealed.bytes, &seg, aad_wrong_stream.as_bytes())
-                .is_err()
-        );
+        assert!(SealedPayload::open(&sealed.bytes, &seg, aad_wrong_stream.as_bytes()).is_err());
     }
 
     #[test]
