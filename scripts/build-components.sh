@@ -52,6 +52,19 @@ TRANSPORT_HTTP="$TARGET/secure_log_transport_http.wasm"
 KEYSTORE_SW="$TARGET/secure_log_keystore_software.wasm"
 RPC_SERVER="$TARGET/secure_log_rpc_server.wasm"
 
+# If SQLITE_WASM is missing and the sibling sqlite-wasm checkout ships
+# its own build script, invoke it so consumers don't have to remember
+# the two-step `cargo build -p sqlite-lib` + `wasm-tools component new`
+# recipe. Only run when SQLITE_WASM is at its default location — a
+# user-set custom path is respected as-is.
+if [[ ! -f "$SQLITE_WASM" && "$SQLITE_WASM" == "$REPO/../sqlite-wasm/build/sqlite.wasm" ]]; then
+    sibling_build="$REPO/../sqlite-wasm/scripts/build-sqlite-wasm.sh"
+    if [[ -x "$sibling_build" ]]; then
+        echo "==> $SQLITE_WASM missing; invoking $sibling_build"
+        "$sibling_build"
+    fi
+fi
+
 # Pre-plug the sqlite engine into the sqlite store provider (reused by the
 # plain and pkcs11 sqlite stacks).
 SQLITE_STORE=""

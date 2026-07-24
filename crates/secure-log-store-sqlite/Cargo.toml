@@ -23,3 +23,15 @@ world = "store-sqlite"
 [package.metadata.component.target.dependencies]
 "secure-log:log" = { path = "../../wit" }
 "sqlite:wasm" = { path = "../../../sqlite-wasm/wit" }
+# Transitive deps of sqlite:wasm — cargo-component does not walk into
+# a path-dep's own wit/deps/, so every package referenced by
+# sqlite-wasm/wit/*.wit must be listed here explicitly.
+"sqlite:extension" = { path = "../../../sqlite-wasm/wit/deps/sqlite-extension" }
+"compose:dynlink" = { path = "../../../sqlite-wasm/wit/deps/compose-dynlink" }
+"sys:compose" = { path = "../../../sqlite-wasm/wit/deps/sys-compose" }
+"wasi:cli" = { path = "../../../sqlite-wasm/wit/deps/wasi-cli-0.2.6" }
+"wasi:clocks" = { path = "../../../sqlite-wasm/wit/deps/wasi-clocks-0.2.6" }
+"wasi:filesystem" = { path = "../../../sqlite-wasm/wit/deps/wasi-filesystem-0.2.6" }
+"wasi:io" = { path = "../../../sqlite-wasm/wit/deps/wasi-io-0.2.6" }
+"wasi:random" = { path = "../../../sqlite-wasm/wit/deps/wasi-random-0.2.6" }
+"wasi:sockets" = { path = "../../../sqlite-wasm/wit/deps/wasi-sockets-0.2.6" }
