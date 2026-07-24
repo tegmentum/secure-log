@@ -6,6 +6,12 @@ package secure-log:verify-host@0.1.0;
 // (stubbed; inline PINs only).
 world verify-host {
     import pkcs11:util/util;
+    // sqlite:wasm loader/dispatch — the sqlite-store backend composes
+    // sqlite:wasm/extension-loader and sqlite:wasm/dispatch as host
+    // imports. Verify never triggers `.load` so these are compile-only
+    // stubs; the impls in src/main.rs return errors / safe defaults.
+    import sqlite:wasm/extension-loader@0.1.0;
+    import sqlite:wasm/dispatch@0.1.0;
     export secure-log:log/encoder@0.1.0;
     export secure-log:log/log@0.1.0;
     export secure-log:log/checkpoint@0.1.0;
