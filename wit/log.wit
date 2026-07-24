@@ -27,6 +27,31 @@ package secure-log:log@0.1.0;
 // Pluggable canonical encoder.
 // ---------------------------------------------------------------------
 interface encoder {
+    // Severity of a log entry, RFC 5424 / POSIX syslog ordering.
+    // Lower ordinal = more urgent. Matches `wasmos:log/logger.severity`
+    // so records that traverse both interfaces do not need remapping.
+    //
+    // This is the canonical severity type for the secure-log package;
+    // `log.append` and `store.secure-log-row` reference it via `use`.
+    enum severity {
+        // 0 — system is unusable.
+        emergency,
+        // 1 — action must be taken immediately.
+        alert,
+        // 2 — critical conditions.
+        critical,
+        // 3 — error conditions.
+        error,
+        // 4 — warning conditions.
+        warning,
+        // 5 — normal but significant condition.
+        notice,
+        // 6 — informational.
+        info,
+        // 7 — debug-level messages.
+        debug,
+    }
+
     // Structural representation of a log entry passed to the encoder.
     //
     // `prev-entry-hash` is 32 zero bytes for the genesis entry of a
@@ -40,7 +65,7 @@ interface encoder {
         seqno:            u64,
         timestamp-rfc3339: string,
         event-type:       string,
-        severity:         string,
+        severity:         severity,
         producer:         string,
         payload-encoding: string,
         payload:          list<u8>,
@@ -81,7 +106,7 @@ interface encoder {
 // Pluggable secure log backend.
 // ---------------------------------------------------------------------
 interface log {
-    use encoder.{entry-fields, checkpoint-fields};
+    use encoder.{entry-fields, checkpoint-fields, severity};
 
     // Open / configure the backing store. MUST be called once before
     // any other method. `config` is forwarded verbatim to the store
@@ -131,7 +156,7 @@ interface log {
     append: func(
         stream-id:    string,
         event-type:   string,
-        severity:     string,
+        severity:     severity,
         producer:     string,
         payload:      list<u8>,
     ) -> result<append-result, string>;

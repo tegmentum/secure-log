@@ -11,6 +11,8 @@
 // `anyhow::Error`).
 
 interface store {
+    use encoder.{severity};
+
     // -- Row types (mirror the Rust SecureLogStore row structs) ----
 
     // A row in the append-only entry table. `seqno` is `none` when
@@ -22,7 +24,7 @@ interface store {
         boot-id:          string,
         timestamp-rfc3339: string,
         event-type:       string,
-        severity:         string,
+        severity:         severity,
         producer:         string,
         payload-encoding: string,
         payload:          list<u8>,

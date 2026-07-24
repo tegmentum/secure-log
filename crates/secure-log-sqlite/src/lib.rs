@@ -27,6 +27,7 @@ use std::path::Path;
 use secure_log::store::{
     SecureLogRow, SecureLogSegmentRow, SecureLogStore, SecureLogStreamRow, WitnessLogRow,
 };
+use secure_log::Severity;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, M1_SECURE_LOG),
@@ -195,7 +196,7 @@ impl SecureLogStore for SqliteSecureLogStore {
                 row.boot_id,
                 row.timestamp_rfc3339,
                 row.event_type,
-                row.severity,
+                row.severity.as_str(),
                 row.producer,
                 row.payload_encoding,
                 row.payload,
@@ -662,6 +663,14 @@ fn row_to_segment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecureLogSegm
 
 fn row_to_secure_log_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecureLogRow> {
     let seqno: i64 = row.get(0)?;
+    let severity_text: String = row.get(6)?;
+    let severity = Severity::try_from(severity_text.as_str()).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+        )
+    })?;
     Ok(SecureLogRow {
         seqno: Some(seqno as u64),
         stream_id: row.get(1)?,
@@ -669,7 +678,7 @@ fn row_to_secure_log_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecureLogR
         boot_id: row.get(3)?,
         timestamp_rfc3339: row.get(4)?,
         event_type: row.get(5)?,
-        severity: row.get(6)?,
+        severity,
         producer: row.get(7)?,
         payload_encoding: row.get(8)?,
         payload: row.get(9)?,
@@ -702,7 +711,7 @@ mod tests {
             boot_id: "b".into(),
             timestamp_rfc3339: "2026-05-21T00:00:00Z".into(),
             event_type: "ev".into(),
-            severity: "info".into(),
+            severity: Severity::Info,
             producer: "p".into(),
             payload_encoding: "cbor".into(),
             payload: vec![1, 2, 3],

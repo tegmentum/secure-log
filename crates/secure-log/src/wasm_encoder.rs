@@ -48,12 +48,16 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use wasmtime::component::{Component, Linker, Val};
+use wasmtime::component::{Component, ComponentExportIndex, Func, Linker, Val};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use super::encoder::CanonicalEncoder;
 use super::model::{CheckpointFields, EntryFields};
+
+/// Fully-qualified WIT interface name that a plugin component must
+/// export. Matches `wit/log.wit` at package `secure-log:log@0.1.0`.
+const ENCODER_INTERFACE: &str = "secure-log:log/encoder@0.1.0";
 
 struct WasmState {
     wasi: WasiCtx,
@@ -86,7 +90,15 @@ pub struct WasmCanonicalEncoder {
 
 struct Inner {
     store: Store<WasmState>,
-    instance: wasmtime::component::Instance,
+    /// Resolved `Func` handles for the three encoder-interface
+    /// exports. The component model requires navigating into the
+    /// interface's export index before looking up its functions —
+    /// a flat `instance.get_func("encode-entry")` returns `None`
+    /// because the function lives under `secure-log:log/encoder@0.1.0`,
+    /// not at the top of the world's exports. We resolve once at
+    /// construction time and reuse the handles for every call.
+    encode_entry: Func,
+    encode_checkpoint: Func,
 }
 
 impl WasmCanonicalEncoder {
@@ -119,14 +131,46 @@ impl WasmCanonicalEncoder {
             },
         );
 
+        // Navigate to the encoder interface's export index BEFORE
+        // instantiation — component-model export indexes are computed
+        // from the `Component` metadata, and looking them up on the
+        // instance requires threading the parent index through
+        // `get_export_index`.
+        let iface_idx = component
+            .get_export_index(None, ENCODER_INTERFACE)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "component at {} does not export interface `{}`",
+                    wasm_path.display(),
+                    ENCODER_INTERFACE
+                )
+            })?;
+        let encode_entry_idx = require_iface_export(&component, &iface_idx, "encode-entry")?;
+        let encode_checkpoint_idx =
+            require_iface_export(&component, &iface_idx, "encode-checkpoint")?;
+        let name_idx = require_iface_export(&component, &iface_idx, "name")?;
+
         let instance = linker.instantiate(&mut store, &component)?;
+
+        let encode_entry = instance
+            .get_func(&mut store, encode_entry_idx)
+            .ok_or_else(|| anyhow::anyhow!("encode-entry export vanished after instantiation"))?;
+        let encode_checkpoint = instance
+            .get_func(&mut store, encode_checkpoint_idx)
+            .ok_or_else(|| {
+                anyhow::anyhow!("encode-checkpoint export vanished after instantiation")
+            })?;
+        let name_func = instance
+            .get_func(&mut store, name_idx)
+            .ok_or_else(|| anyhow::anyhow!("name export vanished after instantiation"))?;
 
         // Call name() once and leak the String into a 'static
         // reference. This is OK: a single encoder instance exists
         // for the life of the program, and the name is a short,
         // bounded string.
-        let name_val = call_no_arg(&mut store, &instance, "name")?;
-        let name_str = match name_val {
+        let mut name_results = vec![Val::Bool(false)];
+        name_func.call(&mut store, &[], &mut name_results)?;
+        let name_str = match name_results.into_iter().next().expect("one result") {
             Val::String(s) => s,
             other => {
                 anyhow::bail!("encoder.name() returned unexpected value: {:?}", other)
@@ -135,49 +179,83 @@ impl WasmCanonicalEncoder {
         let cached_name: &'static str = Box::leak(name_str.into_boxed_str());
 
         Ok(Self {
-            inner: Mutex::new(Inner { store, instance }),
+            inner: Mutex::new(Inner {
+                store,
+                encode_entry,
+                encode_checkpoint,
+            }),
             cached_name,
         })
     }
 }
 
+fn require_iface_export(
+    component: &Component,
+    iface: &ComponentExportIndex,
+    name: &str,
+) -> anyhow::Result<ComponentExportIndex> {
+    component
+        .get_export_index(Some(iface), name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "component's `{}` interface does not export `{}`",
+                ENCODER_INTERFACE,
+                name
+            )
+        })
+}
+
 impl CanonicalEncoder for WasmCanonicalEncoder {
     fn encode_entry(&self, fields: &EntryFields) -> Vec<u8> {
         let mut guard = self.inner.lock().unwrap();
-        let Inner { store, instance } = &mut *guard;
+        let Inner {
+            store,
+            encode_entry,
+            ..
+        } = &mut *guard;
         let record = entry_to_val(fields);
-        match call_one_arg(store, instance, "encode-entry", record) {
-            Ok(Val::List(list)) => list
-                .into_iter()
-                .map(|v| match v {
-                    Val::U8(b) => b,
-                    _ => 0,
-                })
-                .collect(),
-            Ok(other) => panic!("encode-entry returned unexpected value: {:?}", other),
-            Err(e) => panic!("encode-entry call failed: {}", e),
-        }
+        call_bytes_returning(store, *encode_entry, "encode-entry", record)
     }
 
     fn encode_checkpoint(&self, fields: &CheckpointFields) -> Vec<u8> {
         let mut guard = self.inner.lock().unwrap();
-        let Inner { store, instance } = &mut *guard;
+        let Inner {
+            store,
+            encode_checkpoint,
+            ..
+        } = &mut *guard;
         let record = checkpoint_to_val(fields);
-        match call_one_arg(store, instance, "encode-checkpoint", record) {
-            Ok(Val::List(list)) => list
-                .into_iter()
-                .map(|v| match v {
-                    Val::U8(b) => b,
-                    _ => 0,
-                })
-                .collect(),
-            Ok(other) => panic!("encode-checkpoint returned unexpected value: {:?}", other),
-            Err(e) => panic!("encode-checkpoint call failed: {}", e),
-        }
+        call_bytes_returning(store, *encode_checkpoint, "encode-checkpoint", record)
     }
 
     fn name(&self) -> &'static str {
         self.cached_name
+    }
+}
+
+/// Invoke a `func(record) -> list<u8>` and decode the return.
+/// Byte-list-typed encoder outputs are the only shape we call, so
+/// the extraction is inlined here rather than made generic.
+fn call_bytes_returning(
+    store: &mut Store<WasmState>,
+    func: Func,
+    name: &'static str,
+    arg: Val,
+) -> Vec<u8> {
+    let mut results = vec![Val::Bool(false)];
+    match func.call(&mut *store, &[arg], &mut results) {
+        Ok(()) => {}
+        Err(e) => panic!("{name} call failed: {e}"),
+    }
+    match results.into_iter().next().expect("one result") {
+        Val::List(list) => list
+            .into_iter()
+            .map(|v| match v {
+                Val::U8(b) => b,
+                other => panic!("{name} returned non-u8 element: {other:?}"),
+            })
+            .collect(),
+        other => panic!("{name} returned unexpected value: {other:?}"),
     }
 }
 
@@ -204,7 +282,15 @@ fn entry_to_val(fields: &EntryFields) -> Val {
             "event-type".to_string(),
             Val::String(fields.event_type.clone()),
         ),
-        ("severity".to_string(), Val::String(fields.severity.clone())),
+        // The WIT contract defines `severity` as an enum; the
+        // untyped wasmtime call surface encodes enum values as
+        // `Val::Enum(case_name)`. The case name is the exact
+        // lowercase spelling of the WIT variant, which
+        // `Severity::as_str` produces.
+        (
+            "severity".to_string(),
+            Val::Enum(fields.severity.as_str().to_string()),
+        ),
         ("producer".to_string(), Val::String(fields.producer.clone())),
         (
             "payload-encoding".to_string(),
@@ -260,33 +346,6 @@ fn checkpoint_to_val(fields: &CheckpointFields) -> Val {
 
 fn bytes_to_val_list(bytes: &[u8]) -> Val {
     Val::List(bytes.iter().map(|b| Val::U8(*b)).collect())
-}
-
-fn call_no_arg(
-    store: &mut Store<WasmState>,
-    instance: &wasmtime::component::Instance,
-    name: &str,
-) -> anyhow::Result<Val> {
-    let func = instance
-        .get_func(&mut *store, name)
-        .ok_or_else(|| anyhow::anyhow!("component does not export '{}'", name))?;
-    let mut results = vec![Val::Bool(false)];
-    func.call(&mut *store, &[], &mut results)?;
-    Ok(results.into_iter().next().expect("one result"))
-}
-
-fn call_one_arg(
-    store: &mut Store<WasmState>,
-    instance: &wasmtime::component::Instance,
-    name: &str,
-    arg: Val,
-) -> anyhow::Result<Val> {
-    let func = instance
-        .get_func(&mut *store, name)
-        .ok_or_else(|| anyhow::anyhow!("component does not export '{}'", name))?;
-    let mut results = vec![Val::Bool(false)];
-    func.call(&mut *store, &[arg], &mut results)?;
-    Ok(results.into_iter().next().expect("one result"))
 }
 
 #[cfg(test)]

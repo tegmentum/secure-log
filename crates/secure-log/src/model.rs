@@ -4,6 +4,8 @@
 //! `wit/secure-log.wit`. Field names use snake_case in Rust and
 //! kebab-case in the WIT.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use super::hash::{EntryDigest, HASH_LEN};
@@ -15,6 +17,99 @@ pub const ENTRY_VERSION: u32 = 1;
 
 /// Current checkpoint format version.
 pub const CHECKPOINT_VERSION: u32 = 1;
+
+/// Severity of a log entry, RFC 5424 / POSIX syslog ordering. Lower
+/// ordinal = more urgent. Mirrors the `severity` enum in
+/// `wit/log.wit` (which matches `wasmos:log/logger.severity`).
+///
+/// The lowercase spelling of each variant name (`"emergency"`,
+/// `"info"`, ...) is the canonical string form used everywhere at a
+/// serialization boundary that isn't a WIT enum:
+///
+/// - The [`CanonicalEncoder`](super::CanonicalEncoder) writes
+///   `Value::Text(<lowercase name>)` into the CBOR entry array.
+///   Same bytes as the string-era encoder emitted when callers passed
+///   `"info"`, `"warning"`, ...
+/// - The SQLite / file / remote store backends persist and read the
+///   lowercase name in their `severity TEXT NOT NULL` column.
+/// - The JSON-RPC wire format ([`secure-log-rpc`](../secure_log_rpc/index.html))
+///   and the JSONL append-only file format both encode via
+///   `#[serde(rename_all = "lowercase")]`.
+///
+/// The `TryFrom<&str>` impl is strict — unknown severity strings
+/// become [`SecureLogError::Invalid`]; there is no legacy fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    /// 0 — system is unusable.
+    Emergency,
+    /// 1 — action must be taken immediately.
+    Alert,
+    /// 2 — critical conditions.
+    Critical,
+    /// 3 — error conditions.
+    Error,
+    /// 4 — warning conditions.
+    Warning,
+    /// 5 — normal but significant condition.
+    Notice,
+    /// 6 — informational.
+    Info,
+    /// 7 — debug-level messages.
+    Debug,
+}
+
+impl Severity {
+    /// Return the canonical lowercase string form of this severity.
+    /// Stable across versions: the persisted / hashed / on-wire form
+    /// is `self.as_str()` at every boundary.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Emergency => "emergency",
+            Severity::Alert => "alert",
+            Severity::Critical => "critical",
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Notice => "notice",
+            Severity::Info => "info",
+            Severity::Debug => "debug",
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<Severity> for String {
+    fn from(s: Severity) -> String {
+        s.as_str().to_string()
+    }
+}
+
+impl TryFrom<&str> for Severity {
+    type Error = SecureLogError;
+
+    fn try_from(s: &str) -> Result<Self, SecureLogError> {
+        match s {
+            "emergency" => Ok(Severity::Emergency),
+            "alert" => Ok(Severity::Alert),
+            "critical" => Ok(Severity::Critical),
+            "error" => Ok(Severity::Error),
+            "warning" => Ok(Severity::Warning),
+            "notice" => Ok(Severity::Notice),
+            "info" => Ok(Severity::Info),
+            "debug" => Ok(Severity::Debug),
+            other => Err(SecureLogError::Invalid(format!(
+                "unknown severity: {:?} (expected one of \
+                 emergency, alert, critical, error, warning, notice, info, debug)",
+                other
+            ))),
+        }
+    }
+}
 
 /// Structural form of a log entry.
 ///
@@ -30,7 +125,7 @@ pub struct EntryFields {
     pub seqno: u64,
     pub timestamp_rfc3339: String,
     pub event_type: String,
-    pub severity: String,
+    pub severity: Severity,
     pub producer: String,
     /// Identifies the encoding used for `payload`. Matches the
     /// `name()` return of the [`CanonicalEncoder`](super::CanonicalEncoder)

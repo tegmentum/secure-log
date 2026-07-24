@@ -29,7 +29,7 @@ use crate::hash::{hex, sha256, EntryDigest, HASH_LEN, ZERO_HASH};
 use crate::merkle;
 use crate::model::{
     digest_from_vec, AppendResult, EntryFields, InclusionProof, ProofStep, SecureLogError,
-    SegmentInfo, ENTRY_VERSION,
+    SegmentInfo, Severity, ENTRY_VERSION,
 };
 use crate::signer::CheckpointSigner;
 use crate::store::{SecureLogRow, SecureLogSegmentRow, SecureLogStore};
@@ -174,7 +174,7 @@ impl NativeSecureLog {
         &self,
         stream_id: &str,
         event_type: &str,
-        severity: &str,
+        severity: Severity,
         producer: &str,
         plaintext: &[u8],
     ) -> Result<AppendResult, SecureLogError> {
@@ -254,7 +254,7 @@ impl NativeSecureLog {
             seqno: next_seqno,
             timestamp_rfc3339: timestamp.clone(),
             event_type: stored_event_type,
-            severity: severity.to_string(),
+            severity,
             producer: stored_producer,
             payload_encoding: AEAD_NAME.to_string(),
             payload: sealed.bytes.clone(),
@@ -270,7 +270,7 @@ impl NativeSecureLog {
             boot_id: fields.boot_id.clone(),
             timestamp_rfc3339: fields.timestamp_rfc3339.clone(),
             event_type: fields.event_type.clone(),
-            severity: fields.severity.clone(),
+            severity: fields.severity,
             producer: fields.producer.clone(),
             payload_encoding: fields.payload_encoding.clone(),
             payload: fields.payload.clone(),
@@ -755,7 +755,7 @@ impl NativeSecureLog {
                 .ok_or_else(|| SecureLogError::Storage("row has no seqno".into()))?,
             timestamp_rfc3339: row.timestamp_rfc3339.clone(),
             event_type: row.event_type.clone(),
-            severity: row.severity.clone(),
+            severity: row.severity,
             producer: row.producer.clone(),
             payload_encoding: row.payload_encoding.clone(),
             payload: row.payload.clone(),
@@ -782,7 +782,7 @@ impl SecureLog for NativeSecureLog {
         &self,
         stream_id: &str,
         event_type: &str,
-        severity: &str,
+        severity: Severity,
         producer: &str,
         payload: &[u8],
     ) -> Result<AppendResult, SecureLogError> {
@@ -825,7 +825,7 @@ impl SecureLog for NativeSecureLog {
             seqno: next_seqno,
             timestamp_rfc3339: timestamp.clone(),
             event_type: event_type.to_string(),
-            severity: severity.to_string(),
+            severity,
             producer: producer.to_string(),
             payload_encoding: self.encoder.name().to_string(),
             payload: payload.to_vec(),
@@ -841,7 +841,7 @@ impl SecureLog for NativeSecureLog {
             boot_id: fields.boot_id.clone(),
             timestamp_rfc3339: fields.timestamp_rfc3339.clone(),
             event_type: fields.event_type.clone(),
-            severity: fields.severity.clone(),
+            severity: fields.severity,
             producer: fields.producer.clone(),
             payload_encoding: fields.payload_encoding.clone(),
             payload: fields.payload.clone(),

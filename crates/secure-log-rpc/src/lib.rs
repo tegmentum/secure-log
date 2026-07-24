@@ -27,6 +27,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Serde mirror of the WIT `severity` enum. The JSON wire form is the
+/// lowercase variant name (`"info"`, `"warning"`, ...) so it matches
+/// both the on-disk SQLite TEXT column and the JSONL append-only file
+/// format. See `wit/log.wit` for the canonical enum definition.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Emergency,
+    Alert,
+    Critical,
+    Error,
+    Warning,
+    Notice,
+    Info,
+    Debug,
+}
+
 /// Canonical method-name strings. Both the remote provider and the
 /// server reference these so a rename can't desynchronize them.
 pub mod method {
@@ -82,7 +99,7 @@ pub struct WireRow {
     pub boot_id: String,
     pub timestamp_rfc3339: String,
     pub event_type: String,
-    pub severity: String,
+    pub severity: Severity,
     pub producer: String,
     pub payload_encoding: String,
     pub payload: Vec<u8>,

@@ -13,6 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::Severity;
+
 /// A raw row from the `secure_log_streams` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecureLogStreamRow {
@@ -71,7 +73,7 @@ pub struct SecureLogRow {
     pub boot_id: String,
     pub timestamp_rfc3339: String,
     pub event_type: String,
-    pub severity: String,
+    pub severity: Severity,
     pub producer: String,
     pub payload_encoding: String,
     pub payload: Vec<u8>,

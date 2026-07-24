@@ -27,8 +27,39 @@ use wasi::http::types::{
 };
 use wasi::io::streams::StreamError;
 
-use secure_log_rpc::{method as m, Request, WireRow, WireSegment, WireStream, WireWitness};
+use secure_log_rpc::{
+    method as m, Request, Severity as WireSeverity, WireRow, WireSegment, WireStream, WireWitness,
+};
 use serde_json::Value;
+
+// Bridge between the WIT-bindgen `severity` enum (generated for the
+// imported `secure-log:log/store`) and the shared `Severity` in
+// `secure-log-rpc` used on the JSON wire.
+fn sev_to_wire(s: wstore::Severity) -> WireSeverity {
+    match s {
+        wstore::Severity::Emergency => WireSeverity::Emergency,
+        wstore::Severity::Alert => WireSeverity::Alert,
+        wstore::Severity::Critical => WireSeverity::Critical,
+        wstore::Severity::Error => WireSeverity::Error,
+        wstore::Severity::Warning => WireSeverity::Warning,
+        wstore::Severity::Notice => WireSeverity::Notice,
+        wstore::Severity::Info => WireSeverity::Info,
+        wstore::Severity::Debug => WireSeverity::Debug,
+    }
+}
+
+fn sev_from_wire(s: WireSeverity) -> wstore::Severity {
+    match s {
+        WireSeverity::Emergency => wstore::Severity::Emergency,
+        WireSeverity::Alert => wstore::Severity::Alert,
+        WireSeverity::Critical => wstore::Severity::Critical,
+        WireSeverity::Error => wstore::Severity::Error,
+        WireSeverity::Warning => wstore::Severity::Warning,
+        WireSeverity::Notice => wstore::Severity::Notice,
+        WireSeverity::Info => wstore::Severity::Info,
+        WireSeverity::Debug => wstore::Severity::Debug,
+    }
+}
 
 struct Component;
 
@@ -220,7 +251,7 @@ fn to_store_row(r: WireRow) -> wstore::SecureLogRow {
         boot_id: r.boot_id,
         timestamp_rfc3339: r.timestamp_rfc3339,
         event_type: r.event_type,
-        severity: r.severity,
+        severity: sev_from_wire(r.severity),
         producer: r.producer,
         payload_encoding: r.payload_encoding,
         payload: r.payload,
@@ -237,7 +268,7 @@ fn to_wire_row(r: wstore::SecureLogRow) -> WireRow {
         boot_id: r.boot_id,
         timestamp_rfc3339: r.timestamp_rfc3339,
         event_type: r.event_type,
-        severity: r.severity,
+        severity: sev_to_wire(r.severity),
         producer: r.producer,
         payload_encoding: r.payload_encoding,
         payload: r.payload,

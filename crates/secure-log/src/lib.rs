@@ -56,7 +56,7 @@ pub use encoder::{CanonicalEncoder, CborEncoder, ENCODER_CBOR};
 pub use hash::{sha256, EntryDigest, HASH_LEN, ZERO_HASH};
 pub use model::{
     AppendResult, CheckpointFields, EntryFields, InclusionProof, ProofStep, SecureLogError,
-    SegmentInfo, CHECKPOINT_VERSION, ENTRY_VERSION,
+    SegmentInfo, Severity, CHECKPOINT_VERSION, ENTRY_VERSION,
 };
 pub use native::NativeSecureLog;
 pub use signer::{CheckpointSigner, SignerError};
@@ -83,7 +83,7 @@ pub trait SecureLog: Send {
         &self,
         stream_id: &str,
         event_type: &str,
-        severity: &str,
+        severity: Severity,
         producer: &str,
         payload: &[u8],
     ) -> Result<AppendResult, SecureLogError>;

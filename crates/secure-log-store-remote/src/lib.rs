@@ -18,13 +18,45 @@ mod bindings;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use secure_log_rpc::{method as m, WireRow, WireSegment, WireStream, WireWitness};
+use secure_log_rpc::{method as m, Severity as WireSeverity, WireRow, WireSegment, WireStream, WireWitness};
 
 use bindings::secure_log::log::transport;
 
 use bindings::exports::secure_log::log::store::{
-    Guest, SecureLogRow, SecureLogSegmentRow, SecureLogStreamRow, SegmentEntry, WitnessLogRow,
+    Guest, SecureLogRow, SecureLogSegmentRow, SecureLogStreamRow, SegmentEntry, Severity,
+    WitnessLogRow,
 };
+
+// Bridge between the WIT-bindgen `severity` enum (local, generated
+// per-component) and the shared `Severity` in `secure-log-rpc` (used
+// on the JSON-RPC wire). The two enums have identical variants; this
+// keeps the crate boundary honest without pretending they're the
+// same type.
+fn sev_to_wire(s: Severity) -> WireSeverity {
+    match s {
+        Severity::Emergency => WireSeverity::Emergency,
+        Severity::Alert => WireSeverity::Alert,
+        Severity::Critical => WireSeverity::Critical,
+        Severity::Error => WireSeverity::Error,
+        Severity::Warning => WireSeverity::Warning,
+        Severity::Notice => WireSeverity::Notice,
+        Severity::Info => WireSeverity::Info,
+        Severity::Debug => WireSeverity::Debug,
+    }
+}
+
+fn sev_from_wire(s: WireSeverity) -> Severity {
+    match s {
+        WireSeverity::Emergency => Severity::Emergency,
+        WireSeverity::Alert => Severity::Alert,
+        WireSeverity::Critical => Severity::Critical,
+        WireSeverity::Error => Severity::Error,
+        WireSeverity::Warning => Severity::Warning,
+        WireSeverity::Notice => Severity::Notice,
+        WireSeverity::Info => Severity::Info,
+        WireSeverity::Debug => Severity::Debug,
+    }
+}
 
 struct Component;
 
@@ -43,7 +75,7 @@ fn row_to_wire(r: SecureLogRow) -> WireRow {
         boot_id: r.boot_id,
         timestamp_rfc3339: r.timestamp_rfc3339,
         event_type: r.event_type,
-        severity: r.severity,
+        severity: sev_to_wire(r.severity),
         producer: r.producer,
         payload_encoding: r.payload_encoding,
         payload: r.payload,
@@ -60,7 +92,7 @@ fn row_from_wire(r: WireRow) -> SecureLogRow {
         boot_id: r.boot_id,
         timestamp_rfc3339: r.timestamp_rfc3339,
         event_type: r.event_type,
-        severity: r.severity,
+        severity: sev_from_wire(r.severity),
         producer: r.producer,
         payload_encoding: r.payload_encoding,
         payload: r.payload,

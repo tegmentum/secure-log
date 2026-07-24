@@ -18,7 +18,7 @@ use std::cell::RefCell;
 
 use secure_log::{
     CanonicalEncoder, CborEncoder, CheckpointSigner, NativeSecureLog, SecureLog, SecureLogStore,
-    SignerError, HASH_LEN,
+    Severity as CoreSeverity, SignerError, HASH_LEN,
 };
 
 use bindings::exports::secure_log::log::checkpoint;
@@ -67,6 +67,81 @@ fn digest_from_vec(v: Vec<u8>) -> Result<[u8; HASH_LEN], String> {
 }
 
 // ---------------------------------------------------------------------
+// Severity bridges. The WIT `severity` enum is threaded through three
+// separate bindgen namespaces — imported store, exported encoder,
+// exported log — and wit-bindgen materializes a distinct Rust enum
+// for each even though the WIT `use encoder.{severity}` clause makes
+// them one type on the wire. Every bridge routes through
+// [`secure_log::Severity`] (the core type) so verifiers and
+// integration tests only ever see the canonical enum.
+// ---------------------------------------------------------------------
+
+fn store_sev_to_core(s: wstore::Severity) -> CoreSeverity {
+    match s {
+        wstore::Severity::Emergency => CoreSeverity::Emergency,
+        wstore::Severity::Alert => CoreSeverity::Alert,
+        wstore::Severity::Critical => CoreSeverity::Critical,
+        wstore::Severity::Error => CoreSeverity::Error,
+        wstore::Severity::Warning => CoreSeverity::Warning,
+        wstore::Severity::Notice => CoreSeverity::Notice,
+        wstore::Severity::Info => CoreSeverity::Info,
+        wstore::Severity::Debug => CoreSeverity::Debug,
+    }
+}
+
+fn core_sev_to_store(s: CoreSeverity) -> wstore::Severity {
+    match s {
+        CoreSeverity::Emergency => wstore::Severity::Emergency,
+        CoreSeverity::Alert => wstore::Severity::Alert,
+        CoreSeverity::Critical => wstore::Severity::Critical,
+        CoreSeverity::Error => wstore::Severity::Error,
+        CoreSeverity::Warning => wstore::Severity::Warning,
+        CoreSeverity::Notice => wstore::Severity::Notice,
+        CoreSeverity::Info => wstore::Severity::Info,
+        CoreSeverity::Debug => wstore::Severity::Debug,
+    }
+}
+
+fn encoder_sev_to_core(s: encoder::Severity) -> CoreSeverity {
+    match s {
+        encoder::Severity::Emergency => CoreSeverity::Emergency,
+        encoder::Severity::Alert => CoreSeverity::Alert,
+        encoder::Severity::Critical => CoreSeverity::Critical,
+        encoder::Severity::Error => CoreSeverity::Error,
+        encoder::Severity::Warning => CoreSeverity::Warning,
+        encoder::Severity::Notice => CoreSeverity::Notice,
+        encoder::Severity::Info => CoreSeverity::Info,
+        encoder::Severity::Debug => CoreSeverity::Debug,
+    }
+}
+
+fn core_sev_to_encoder(s: CoreSeverity) -> encoder::Severity {
+    match s {
+        CoreSeverity::Emergency => encoder::Severity::Emergency,
+        CoreSeverity::Alert => encoder::Severity::Alert,
+        CoreSeverity::Critical => encoder::Severity::Critical,
+        CoreSeverity::Error => encoder::Severity::Error,
+        CoreSeverity::Warning => encoder::Severity::Warning,
+        CoreSeverity::Notice => encoder::Severity::Notice,
+        CoreSeverity::Info => encoder::Severity::Info,
+        CoreSeverity::Debug => encoder::Severity::Debug,
+    }
+}
+
+fn log_sev_to_core(s: log::Severity) -> CoreSeverity {
+    match s {
+        log::Severity::Emergency => CoreSeverity::Emergency,
+        log::Severity::Alert => CoreSeverity::Alert,
+        log::Severity::Critical => CoreSeverity::Critical,
+        log::Severity::Error => CoreSeverity::Error,
+        log::Severity::Warning => CoreSeverity::Warning,
+        log::Severity::Notice => CoreSeverity::Notice,
+        log::Severity::Info => CoreSeverity::Info,
+        log::Severity::Debug => CoreSeverity::Debug,
+    }
+}
+
+// ---------------------------------------------------------------------
 // Store-row conversions (imported `store` records <-> core rows).
 // ---------------------------------------------------------------------
 
@@ -78,7 +153,7 @@ fn row_to_w(r: &secure_log::SecureLogRow) -> wstore::SecureLogRow {
         boot_id: r.boot_id.clone(),
         timestamp_rfc3339: r.timestamp_rfc3339.clone(),
         event_type: r.event_type.clone(),
-        severity: r.severity.clone(),
+        severity: core_sev_to_store(r.severity),
         producer: r.producer.clone(),
         payload_encoding: r.payload_encoding.clone(),
         payload: r.payload.clone(),
@@ -95,7 +170,7 @@ fn row_from_w(r: wstore::SecureLogRow) -> secure_log::SecureLogRow {
         boot_id: r.boot_id,
         timestamp_rfc3339: r.timestamp_rfc3339,
         event_type: r.event_type,
-        severity: r.severity,
+        severity: store_sev_to_core(r.severity),
         producer: r.producer,
         payload_encoding: r.payload_encoding,
         payload: r.payload,
@@ -361,7 +436,7 @@ fn entry_to_w(f: secure_log::EntryFields) -> WEntryFields {
         seqno: f.seqno,
         timestamp_rfc3339: f.timestamp_rfc3339,
         event_type: f.event_type,
-        severity: f.severity,
+        severity: core_sev_to_encoder(f.severity),
         producer: f.producer,
         payload_encoding: f.payload_encoding,
         payload: f.payload,
@@ -378,7 +453,7 @@ fn entry_from_w(f: WEntryFields) -> secure_log::EntryFields {
         seqno: f.seqno,
         timestamp_rfc3339: f.timestamp_rfc3339,
         event_type: f.event_type,
-        severity: f.severity,
+        severity: encoder_sev_to_core(f.severity),
         producer: f.producer,
         payload_encoding: f.payload_encoding,
         payload: f.payload,
@@ -486,11 +561,12 @@ impl log::Guest for Component {
     fn append(
         stream_id: String,
         event_type: String,
-        severity: String,
+        severity: log::Severity,
         producer: String,
         payload: Vec<u8>,
     ) -> Result<WAppendResult, String> {
-        with_log(|log| log.append(&stream_id, &event_type, &severity, &producer, &payload))
+        let sev = log_sev_to_core(severity);
+        with_log(|log| log.append(&stream_id, &event_type, sev, &producer, &payload))
             .map(|r| WAppendResult {
                 seqno: r.seqno,
                 entry_hash: r.entry_hash.to_vec(),
@@ -732,7 +808,10 @@ impl checkpoint::Guest for Component {
 // secure-log's richer surface.
 //
 // Mapping:
-//   entry.severity (enum) → SecureLog severity string ("info", "warn", …)
+//   entry.severity (enum) → secure_log::Severity (identity 1:1 —
+//                           the tegmentum:log/logger enum has the
+//                           same eight RFC 5424 variants as
+//                           secure-log's canonical severity)
 //   entry.category        → SecureLog stream_id (defaults to "default")
 //   entry.producer        → SecureLog producer (passed through verbatim)
 //   entry.message         → JSON-wrapped payload when fields are present:
@@ -747,16 +826,16 @@ impl checkpoint::Guest for Component {
 
 use bindings::exports::tegmentum::log::logger as wlogger;
 
-fn severity_to_str(s: wlogger::Severity) -> &'static str {
+fn wlogger_sev_to_core(s: wlogger::Severity) -> CoreSeverity {
     match s {
-        wlogger::Severity::Emergency => "emerg",
-        wlogger::Severity::Alert => "alert",
-        wlogger::Severity::Critical => "crit",
-        wlogger::Severity::Error => "err",
-        wlogger::Severity::Warning => "warning",
-        wlogger::Severity::Notice => "notice",
-        wlogger::Severity::Info => "info",
-        wlogger::Severity::Debug => "debug",
+        wlogger::Severity::Emergency => CoreSeverity::Emergency,
+        wlogger::Severity::Alert => CoreSeverity::Alert,
+        wlogger::Severity::Critical => CoreSeverity::Critical,
+        wlogger::Severity::Error => CoreSeverity::Error,
+        wlogger::Severity::Warning => CoreSeverity::Warning,
+        wlogger::Severity::Notice => CoreSeverity::Notice,
+        wlogger::Severity::Info => CoreSeverity::Info,
+        wlogger::Severity::Debug => CoreSeverity::Debug,
     }
 }
 
@@ -808,7 +887,7 @@ impl wlogger::Guest for Component {
         } else {
             rec.category
         };
-        let severity = severity_to_str(rec.severity);
+        let severity = wlogger_sev_to_core(rec.severity);
         let payload = encode_payload(&rec.message, &rec.fields);
         // Best-effort: a write-only logger drops on backend error.
         // Consumers that need delivery guarantees use the richer

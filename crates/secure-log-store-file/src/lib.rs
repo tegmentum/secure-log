@@ -21,7 +21,8 @@ use std::io::Write;
 use serde::{Deserialize, Serialize};
 
 use bindings::exports::secure_log::log::store::{
-    Guest, SecureLogRow, SecureLogSegmentRow, SecureLogStreamRow, SegmentEntry, WitnessLogRow,
+    Guest, SecureLogRow, SecureLogSegmentRow, SecureLogStreamRow, SegmentEntry, Severity,
+    WitnessLogRow,
 };
 
 struct Component;
@@ -31,6 +32,49 @@ struct Component;
 // derive serde, so we keep our own and convert).
 // ---------------------------------------------------------------------
 
+/// Local mirror of the WIT `severity` enum with a JSON-friendly
+/// `lowercase` representation. Kept independent of the bindgen type
+/// so the JSONL file format is stable and readable (`"info"`, not
+/// `"Info"` and not a numeric discriminant).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum FSeverity {
+    Emergency,
+    Alert,
+    Critical,
+    Error,
+    Warning,
+    Notice,
+    Info,
+    Debug,
+}
+
+fn sev_to_local(s: Severity) -> FSeverity {
+    match s {
+        Severity::Emergency => FSeverity::Emergency,
+        Severity::Alert => FSeverity::Alert,
+        Severity::Critical => FSeverity::Critical,
+        Severity::Error => FSeverity::Error,
+        Severity::Warning => FSeverity::Warning,
+        Severity::Notice => FSeverity::Notice,
+        Severity::Info => FSeverity::Info,
+        Severity::Debug => FSeverity::Debug,
+    }
+}
+
+fn sev_to_bindgen(s: FSeverity) -> Severity {
+    match s {
+        FSeverity::Emergency => Severity::Emergency,
+        FSeverity::Alert => Severity::Alert,
+        FSeverity::Critical => Severity::Critical,
+        FSeverity::Error => Severity::Error,
+        FSeverity::Warning => Severity::Warning,
+        FSeverity::Notice => Severity::Notice,
+        FSeverity::Info => Severity::Info,
+        FSeverity::Debug => Severity::Debug,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct FRow {
     seqno: u64,
@@ -39,7 +83,7 @@ struct FRow {
     boot_id: String,
     timestamp_rfc3339: String,
     event_type: String,
-    severity: String,
+    severity: FSeverity,
     producer: String,
     payload_encoding: String,
     payload: Vec<u8>,
@@ -269,7 +313,7 @@ fn frow_to_w(r: &FRow) -> SecureLogRow {
         boot_id: r.boot_id.clone(),
         timestamp_rfc3339: r.timestamp_rfc3339.clone(),
         event_type: r.event_type.clone(),
-        severity: r.severity.clone(),
+        severity: sev_to_bindgen(r.severity),
         producer: r.producer.clone(),
         payload_encoding: r.payload_encoding.clone(),
         payload: r.payload.clone(),
@@ -346,7 +390,7 @@ impl Guest for Component {
                     boot_id: row.boot_id,
                     timestamp_rfc3339: row.timestamp_rfc3339,
                     event_type: row.event_type,
-                    severity: row.severity,
+                    severity: sev_to_local(row.severity),
                     producer: row.producer,
                     payload_encoding: row.payload_encoding,
                     payload: row.payload,

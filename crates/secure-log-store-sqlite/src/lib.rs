@@ -19,7 +19,8 @@ use bindings::sqlite::wasm::high_level as sql;
 use bindings::sqlite::wasm::high_level::{Connection, Value};
 
 use bindings::exports::secure_log::log::store::{
-    Guest, SecureLogRow, SecureLogSegmentRow, SecureLogStreamRow, SegmentEntry, WitnessLogRow,
+    Guest, SecureLogRow, SecureLogSegmentRow, SecureLogStreamRow, SegmentEntry, Severity,
+    WitnessLogRow,
 };
 
 struct Component;
@@ -265,6 +266,39 @@ fn as_opt_blob(v: &Value) -> Result<Option<Vec<u8>>, String> {
 }
 
 // ---------------------------------------------------------------------
+// Severity <-> lowercase TEXT column. The SQL schema keeps
+// `severity TEXT NOT NULL`; only the in-process representation
+// changed to a WIT enum. See wit/log.wit for the canonical spelling.
+// ---------------------------------------------------------------------
+
+fn severity_to_text(s: Severity) -> &'static str {
+    match s {
+        Severity::Emergency => "emergency",
+        Severity::Alert => "alert",
+        Severity::Critical => "critical",
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Notice => "notice",
+        Severity::Info => "info",
+        Severity::Debug => "debug",
+    }
+}
+
+fn severity_from_text(s: &str) -> Result<Severity, String> {
+    match s {
+        "emergency" => Ok(Severity::Emergency),
+        "alert" => Ok(Severity::Alert),
+        "critical" => Ok(Severity::Critical),
+        "error" => Ok(Severity::Error),
+        "warning" => Ok(Severity::Warning),
+        "notice" => Ok(Severity::Notice),
+        "info" => Ok(Severity::Info),
+        "debug" => Ok(Severity::Debug),
+        other => Err(format!("unknown severity in secure_log row: {:?}", other)),
+    }
+}
+
+// ---------------------------------------------------------------------
 // Row mappers (SELECT column order must match these).
 // ---------------------------------------------------------------------
 
@@ -276,7 +310,7 @@ fn to_secure_log_row(cols: &[Value]) -> Result<SecureLogRow, String> {
         boot_id: as_text(&cols[3])?,
         timestamp_rfc3339: as_text(&cols[4])?,
         event_type: as_text(&cols[5])?,
-        severity: as_text(&cols[6])?,
+        severity: severity_from_text(&as_text(&cols[6])?)?,
         producer: as_text(&cols[7])?,
         payload_encoding: as_text(&cols[8])?,
         payload: as_blob(&cols[9])?,
@@ -372,7 +406,7 @@ impl Guest for Component {
                     vt(&row.boot_id),
                     vt(&row.timestamp_rfc3339),
                     vt(&row.event_type),
-                    vt(&row.severity),
+                    vt(severity_to_text(row.severity)),
                     vt(&row.producer),
                     vt(&row.payload_encoding),
                     vb(&row.payload),

@@ -80,7 +80,12 @@ impl CanonicalEncoder for CborEncoder {
             Value::Integer(fields.seqno.into()),
             Value::Text(fields.timestamp_rfc3339.clone()),
             Value::Text(fields.event_type.clone()),
-            Value::Text(fields.severity.clone()),
+            // Emit the severity as CBOR major type 3 (text string) so
+            // the bytes are identical to what the pre-enum encoder
+            // produced when callers passed `severity: String`. The
+            // stable spelling is `Severity::as_str()` — see the model
+            // module for the mapping.
+            Value::Text(fields.severity.as_str().to_string()),
             Value::Text(fields.producer.clone()),
             Value::Text(fields.payload_encoding.clone()),
             Value::Bytes(fields.payload.clone()),
@@ -122,7 +127,7 @@ impl CanonicalEncoder for CborEncoder {
 mod tests {
     use super::*;
     use crate::hash::ZERO_HASH;
-    use crate::model::ENTRY_VERSION;
+    use crate::model::{Severity, ENTRY_VERSION};
 
     fn sample_entry() -> EntryFields {
         EntryFields {
@@ -133,7 +138,7 @@ mod tests {
             seqno: 0,
             timestamp_rfc3339: "2026-04-10T00:00:00Z".into(),
             event_type: "test.event".into(),
-            severity: "info".into(),
+            severity: Severity::Info,
             producer: "unit-test".into(),
             payload_encoding: "cbor".into(),
             payload: b"hello".to_vec(),
@@ -191,6 +196,82 @@ mod tests {
             "expected byte-string header 0x45 before payload, got {:02x?}",
             bytes
         );
+    }
+
+    #[test]
+    fn severity_encodes_as_lowercase_text_string() {
+        // Wire-format regression guard: the canonical CBOR must be
+        // byte-identical to what the pre-enum encoder produced when
+        // callers passed `severity: "info".to_string()`. If this
+        // assertion ever fails, a stored entry's chain hash would
+        // stop reproducing — the on-disk bytes must not change even
+        // though the Rust type went from `String` to `Severity`.
+        //
+        // The "string era" bytes are reconstructed here from first
+        // principles rather than baked in: build the same CBOR array
+        // but with a plain text severity, and compare against what
+        // the current encoder emits for the sample entry.
+        use ciborium::value::Value;
+        let enc = CborEncoder::new();
+        let bytes_enum = enc.encode_entry(&sample_entry());
+
+        let string_era_value = Value::Array(vec![
+            Value::Integer(ENTRY_VERSION.into()),
+            Value::Text("default".into()),
+            Value::Text("sess-1".into()),
+            Value::Text("boot-1".into()),
+            Value::Integer(0u64.into()),
+            Value::Text("2026-04-10T00:00:00Z".into()),
+            Value::Text("test.event".into()),
+            Value::Text("info".into()),
+            Value::Text("unit-test".into()),
+            Value::Text("cbor".into()),
+            Value::Bytes(b"hello".to_vec()),
+            Value::Bytes(ZERO_HASH.to_vec()),
+        ]);
+        let mut string_era_bytes = Vec::new();
+        ciborium::ser::into_writer(&string_era_value, &mut string_era_bytes)
+            .expect("cbor encoding cannot fail on Vec writer");
+
+        assert_eq!(
+            bytes_enum, string_era_bytes,
+            "Severity::Info must encode to identical CBOR bytes as the free-form \
+             string \"info\" that the pre-enum encoder produced"
+        );
+    }
+
+    #[test]
+    fn every_severity_variant_encodes_to_its_lowercase_name() {
+        // Sanity-check every variant so the wire-format guarantee is
+        // symmetric across the enum, not just for `info`.
+        let enc = CborEncoder::new();
+        for (variant, expected) in [
+            (Severity::Emergency, "emergency"),
+            (Severity::Alert, "alert"),
+            (Severity::Critical, "critical"),
+            (Severity::Error, "error"),
+            (Severity::Warning, "warning"),
+            (Severity::Notice, "notice"),
+            (Severity::Info, "info"),
+            (Severity::Debug, "debug"),
+        ] {
+            let mut e = sample_entry();
+            e.severity = variant;
+            let bytes = enc.encode_entry(&e);
+            // Find the expected text-string header + body somewhere
+            // in the encoded array. CBOR major type 3 (text string)
+            // header for a short string of length n is 0x60 | n.
+            let hdr = 0x60u8 | (expected.len() as u8);
+            let mut needle = Vec::with_capacity(1 + expected.len());
+            needle.push(hdr);
+            needle.extend_from_slice(expected.as_bytes());
+            assert!(
+                bytes.windows(needle.len()).any(|w| w == needle),
+                "severity {:?} should embed CBOR text {:?} in the entry bytes",
+                variant,
+                expected
+            );
+        }
     }
 
     #[test]
