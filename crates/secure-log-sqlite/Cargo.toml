@@ -1,6 +1,6 @@
 [package]
 name = "secure-log-sqlite"
-description = "SQLite-backed storage for the secure-log tamper-evident audit log."
+description = "SQLite-backed storage for the secure-log tamper-evident audit log, on sqlink's sqlite-component-core."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,14 @@ repository.workspace = true
 
 [dependencies]
 secure-log = { path = "../secure-log" }
-rusqlite.workspace = true
+# SQLite substrate: sqlink's sqlite-component-core (pins
+# libsqlite3-sys 0.38 with the `bundled` feature). Sharing this
+# substrate with wasmos-chronos and other sqlink-derived crates
+# lets downstream consumers (e.g. wasmos-runtime taking
+# secure-log-sqlite via the audit adapter) link a single copy
+# of `libsqlite3-sys` and avoid the Cargo `links = "sqlite3"`
+# uniqueness conflict against rusqlite-0.32's older 0.30 pin.
+sqlite-component-core = { path = "../../../sqlink/sqlite-wasm/core" }
 thiserror.workspace = true
 anyhow = "1"
 

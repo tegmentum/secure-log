@@ -1,8 +1,9 @@
 //! SQLite-backed storage for the [`secure_log`] crate.
 //!
-//! [`SqliteSecureLogStore`] owns a [`rusqlite::Connection`] and
-//! implements the [`SecureLogStore`] trait by translating each
-//! method into the appropriate SQL.
+//! [`SqliteSecureLogStore`] owns a [`sqlite_component_core::db::Connection`]
+//! (wrapped in a [`Mutex`] because the raw handle is `Send + !Sync`) and
+//! implements the [`SecureLogStore`] trait by translating each method
+//! into the appropriate SQL.
 //!
 //! ## Schema
 //!
@@ -20,9 +21,22 @@
 //! - **M3** `witness_log` — externally-witnessed checkpoint receipts.
 //! - **M4** `secure_log_streams` — per-stream metadata (tier,
 //!   description, soft-delete).
+//!
+//! ## Substrate
+//!
+//! Built on sqlink's [`sqlite-component-core`] rather than `rusqlite`
+//! so this crate can be linked alongside sqlink-derived SQLite code
+//! (e.g. wasmos-chronos) in the same binary without tripping Cargo's
+//! `links = "sqlite3"` uniqueness rule. Both crates share a single
+//! `libsqlite3-sys 0.38` pin via sqlink.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+
+use sqlite_component_core::db::{
+    Connection, Error as SqliteError, OpenFlags, Statement, StepResult, Value as SqliteValue,
+};
 
 use secure_log::store::{
     SecureLogRow, SecureLogSegmentRow, SecureLogStore, SecureLogStreamRow, WitnessLogRow,
@@ -112,7 +126,7 @@ VALUES ('default', 'public', 'Default stream created automatically at init.');
 
 /// SQLite-backed [`SecureLogStore`].
 pub struct SqliteSecureLogStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl SqliteSecureLogStore {
@@ -124,18 +138,31 @@ impl SqliteSecureLogStore {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let store = Self { conn };
+        // No-op on native targets; registers the WASI-backed VFS on
+        // wasm32-wasip2 so file-backed opens actually persist. Safe
+        // to call many times.
+        sqlite_component_core::db::init_wasivfs().map_err(anyhow_err)?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))?;
+        let conn = Connection::open(path_str, OpenFlags::DEFAULT).map_err(anyhow_err)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .map_err(anyhow_err)?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.migrate()?;
         Ok(store)
     }
 
     /// Open an in-memory SQLite store (for tests).
     pub fn open_in_memory() -> anyhow::Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let store = Self { conn };
+        let conn = Connection::open_in_memory().map_err(anyhow_err)?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .map_err(anyhow_err)?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -144,78 +171,98 @@ impl SqliteSecureLogStore {
     /// responsible for any PRAGMA configuration; migrations run
     /// automatically.
     pub fn from_connection(conn: Connection) -> anyhow::Result<Self> {
-        let store = Self { conn };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.migrate()?;
         Ok(store)
     }
 
     fn migrate(&self) -> anyhow::Result<()> {
-        self.conn.execute_batch(
+        let conn = self.lock()?;
+        conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS _secure_log_migrations (
                 version INTEGER PRIMARY KEY,
                 applied TEXT NOT NULL DEFAULT (datetime('now'))
             );",
-        )?;
+        )
+        .map_err(anyhow_err)?;
         for (version, sql) in MIGRATIONS {
-            let exists: Option<i64> = self
-                .conn
-                .query_row(
-                    "SELECT version FROM _secure_log_migrations WHERE version = ?1",
-                    params![*version as i64],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if exists.is_some() {
+            let exists = {
+                let mut stmt = conn
+                    .prepare("SELECT version FROM _secure_log_migrations WHERE version = ?1")
+                    .map_err(anyhow_err)?;
+                stmt.bind(1, &SqliteValue::Integer(*version as i64))
+                    .map_err(anyhow_err)?;
+                matches!(stmt.step().map_err(anyhow_err)?, StepResult::Row)
+            };
+            if exists {
                 continue;
             }
-            self.conn.execute_batch(sql)?;
-            self.conn.execute(
-                "INSERT INTO _secure_log_migrations (version) VALUES (?1)",
-                params![*version as i64],
-            )?;
+            conn.execute_batch(sql).map_err(anyhow_err)?;
+            let mut ins = conn
+                .prepare("INSERT INTO _secure_log_migrations (version) VALUES (?1)")
+                .map_err(anyhow_err)?;
+            ins.bind(1, &SqliteValue::Integer(*version as i64))
+                .map_err(anyhow_err)?;
+            step_done(&mut ins, "INSERT INTO _secure_log_migrations")?;
         }
         Ok(())
     }
+
+    fn lock(&self) -> anyhow::Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("secure-log sqlite mutex poisoned"))
+    }
 }
+
+// ---------------------------------------------------------------------
+// SecureLogStore impl
+// ---------------------------------------------------------------------
 
 impl SecureLogStore for SqliteSecureLogStore {
     fn secure_log_insert(&self, row: &SecureLogRow) -> anyhow::Result<u64> {
         let seqno = row
             .seqno
             .ok_or_else(|| anyhow::anyhow!("secure_log_insert requires row.seqno to be Some"))?;
-        self.conn.execute(
-            "INSERT INTO secure_log (
-                seqno, stream_id, session_id, boot_id, timestamp,
-                event_type, severity, producer, payload_encoding,
-                payload, prev_entry_hash, entry_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                seqno as i64,
-                row.stream_id,
-                row.session_id,
-                row.boot_id,
-                row.timestamp_rfc3339,
-                row.event_type,
-                row.severity.as_str(),
-                row.producer,
-                row.payload_encoding,
-                row.payload,
-                row.prev_entry_hash,
-                row.entry_hash,
-            ],
-        )?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO secure_log (
+                    seqno, stream_id, session_id, boot_id, timestamp,
+                    event_type, severity, producer, payload_encoding,
+                    payload, prev_entry_hash, entry_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind(1, &SqliteValue::Integer(seqno as i64))
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(2, &row.stream_id).map_err(anyhow_err)?;
+        stmt.bind_text_ref(3, &row.session_id).map_err(anyhow_err)?;
+        stmt.bind_text_ref(4, &row.boot_id).map_err(anyhow_err)?;
+        stmt.bind_text_ref(5, &row.timestamp_rfc3339)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(6, &row.event_type).map_err(anyhow_err)?;
+        stmt.bind_text_ref(7, row.severity.as_str())
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(8, &row.producer).map_err(anyhow_err)?;
+        stmt.bind_text_ref(9, &row.payload_encoding)
+            .map_err(anyhow_err)?;
+        stmt.bind_blob_ref(10, &row.payload).map_err(anyhow_err)?;
+        stmt.bind_blob_ref(11, &row.prev_entry_hash)
+            .map_err(anyhow_err)?;
+        stmt.bind_blob_ref(12, &row.entry_hash).map_err(anyhow_err)?;
+        step_done(&mut stmt, "INSERT INTO secure_log")?;
         Ok(seqno)
     }
 
     fn secure_log_global_head(&self) -> anyhow::Result<Option<u64>> {
-        self.conn
-            .query_row("SELECT MAX(seqno) FROM secure_log", [], |row| {
-                let v: Option<i64> = row.get(0)?;
-                Ok(v.map(|n| n as u64))
-            })
-            .optional()
-            .map(|r| r.flatten())
-            .map_err(Into::into)
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT MAX(seqno) FROM secure_log")
+            .map_err(anyhow_err)?;
+        read_max_u64(&mut stmt)
     }
 
     fn secure_log_segment_insert(
@@ -223,39 +270,57 @@ impl SecureLogStore for SqliteSecureLogStore {
         row: &SecureLogSegmentRow,
         entries: &[(u64, u64)],
     ) -> anyhow::Result<u64> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO secure_log_segments (
-                stream_id, seq_start, seq_end, merkle_root,
-                last_entry_hash, prev_checkpoint_hash, closed_at,
-                signature, signer_identity
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                row.stream_id,
-                row.seq_start as i64,
-                row.seq_end as i64,
-                row.merkle_root,
-                row.last_entry_hash,
-                row.prev_checkpoint_hash,
-                row.closed_at_rfc3339,
-                row.signature,
-                row.signer_identity,
-            ],
-        )?;
-        let segment_id = tx.last_insert_rowid() as u64;
+        let conn = self.lock()?;
+        let tx = Tx::begin(&conn)?;
+
         {
-            let mut stmt = tx.prepare(
-                "INSERT INTO secure_log_segment_entries (segment_id, seqno, leaf_index)
-                 VALUES (?1, ?2, ?3)",
-            )?;
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO secure_log_segments (
+                        stream_id, seq_start, seq_end, merkle_root,
+                        last_entry_hash, prev_checkpoint_hash, closed_at,
+                        signature, signer_identity
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .map_err(anyhow_err)?;
+            stmt.bind_text_ref(1, &row.stream_id).map_err(anyhow_err)?;
+            stmt.bind(2, &SqliteValue::Integer(row.seq_start as i64))
+                .map_err(anyhow_err)?;
+            stmt.bind(3, &SqliteValue::Integer(row.seq_end as i64))
+                .map_err(anyhow_err)?;
+            stmt.bind_blob_ref(4, &row.merkle_root).map_err(anyhow_err)?;
+            stmt.bind_blob_ref(5, &row.last_entry_hash)
+                .map_err(anyhow_err)?;
+            stmt.bind_blob_ref(6, &row.prev_checkpoint_hash)
+                .map_err(anyhow_err)?;
+            stmt.bind_text_ref(7, &row.closed_at_rfc3339)
+                .map_err(anyhow_err)?;
+            bind_opt_blob(&mut stmt, 8, row.signature.as_deref())?;
+            bind_opt_text(&mut stmt, 9, row.signer_identity.as_deref())?;
+            step_done(&mut stmt, "INSERT INTO secure_log_segments")?;
+        }
+        let segment_id = conn.last_insert_rowid() as u64;
+
+        {
+            let mut stmt = conn
+                .prepare(
+                    "INSERT INTO secure_log_segment_entries (segment_id, seqno, leaf_index)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .map_err(anyhow_err)?;
             for (seqno, leaf_index) in entries {
-                stmt.execute(params![
-                    segment_id as i64,
-                    *seqno as i64,
-                    *leaf_index as i64
-                ])?;
+                stmt.reset().map_err(anyhow_err)?;
+                stmt.clear_bindings().map_err(anyhow_err)?;
+                stmt.bind(1, &SqliteValue::Integer(segment_id as i64))
+                    .map_err(anyhow_err)?;
+                stmt.bind(2, &SqliteValue::Integer(*seqno as i64))
+                    .map_err(anyhow_err)?;
+                stmt.bind(3, &SqliteValue::Integer(*leaf_index as i64))
+                    .map_err(anyhow_err)?;
+                step_done(&mut stmt, "INSERT INTO secure_log_segment_entries")?;
             }
         }
+
         tx.commit()?;
         Ok(segment_id)
     }
@@ -264,80 +329,90 @@ impl SecureLogStore for SqliteSecureLogStore {
         &self,
         segment_id: u64,
     ) -> anyhow::Result<Option<SecureLogSegmentRow>> {
-        self.conn
-            .query_row(
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
                 "SELECT segment_id, stream_id, seq_start, seq_end,
                         merkle_root, last_entry_hash, prev_checkpoint_hash,
                         closed_at, signature, signer_identity
                  FROM secure_log_segments WHERE segment_id = ?1",
-                params![segment_id as i64],
-                row_to_segment_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .map_err(anyhow_err)?;
+        stmt.bind(1, &SqliteValue::Integer(segment_id as i64))
+            .map_err(anyhow_err)?;
+        match stmt.step().map_err(anyhow_err)? {
+            StepResult::Row => Ok(Some(row_to_segment_row(&stmt)?)),
+            StepResult::Done => Ok(None),
+        }
     }
 
     fn secure_log_segments_list(
         &self,
         stream_id: &str,
     ) -> anyhow::Result<Vec<SecureLogSegmentRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT segment_id, stream_id, seq_start, seq_end,
-                    merkle_root, last_entry_hash, prev_checkpoint_hash,
-                    closed_at, signature, signer_identity
-             FROM secure_log_segments WHERE stream_id = ?1 ORDER BY segment_id",
-        )?;
-        let rows = stmt.query_map(params![stream_id], row_to_segment_row)?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT segment_id, stream_id, seq_start, seq_end,
+                        merkle_root, last_entry_hash, prev_checkpoint_hash,
+                        closed_at, signature, signer_identity
+                 FROM secure_log_segments WHERE stream_id = ?1 ORDER BY segment_id",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_segment_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
 
     fn secure_log_segment_last_seqno(&self, stream_id: &str) -> anyhow::Result<Option<u64>> {
-        self.conn
-            .query_row(
-                "SELECT MAX(seq_end) FROM secure_log_segments WHERE stream_id = ?1",
-                params![stream_id],
-                |row| {
-                    let v: Option<i64> = row.get(0)?;
-                    Ok(v.map(|n| n as u64))
-                },
-            )
-            .optional()
-            .map(|r| r.flatten())
-            .map_err(Into::into)
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT MAX(seq_end) FROM secure_log_segments WHERE stream_id = ?1")
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
+        read_max_u64(&mut stmt)
     }
 
     fn secure_log_segment_entry_seqnos(&self, segment_id: u64) -> anyhow::Result<Vec<u64>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT seqno FROM secure_log_segment_entries
-             WHERE segment_id = ?1 ORDER BY leaf_index",
-        )?;
-        let rows = stmt.query_map(params![segment_id as i64], |row| {
-            let n: i64 = row.get(0)?;
-            Ok(n as u64)
-        })?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seqno FROM secure_log_segment_entries
+                 WHERE segment_id = ?1 ORDER BY leaf_index",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind(1, &SqliteValue::Integer(segment_id as i64))
+            .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => {
+                    let n = read_i64(stmt.column_value(0))?;
+                    out.push(n as u64);
+                }
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
 
     fn secure_log_segment_for_seqno(&self, seqno: u64) -> anyhow::Result<Option<u64>> {
-        self.conn
-            .query_row(
-                "SELECT segment_id FROM secure_log_segment_entries WHERE seqno = ?1",
-                params![seqno as i64],
-                |row| {
-                    let n: i64 = row.get(0)?;
-                    Ok(n as u64)
-                },
-            )
-            .optional()
-            .map_err(Into::into)
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT segment_id FROM secure_log_segment_entries WHERE seqno = ?1")
+            .map_err(anyhow_err)?;
+        stmt.bind(1, &SqliteValue::Integer(seqno as i64))
+            .map_err(anyhow_err)?;
+        match stmt.step().map_err(anyhow_err)? {
+            StepResult::Row => Ok(Some(read_i64(stmt.column_value(0))? as u64)),
+            StepResult::Done => Ok(None),
+        }
     }
 
     fn secure_log_segment_set_signature(
@@ -346,75 +421,107 @@ impl SecureLogStore for SqliteSecureLogStore {
         signature: &[u8],
         signer_identity: &str,
     ) -> anyhow::Result<()> {
-        let count = self.conn.execute(
-            "UPDATE secure_log_segments
-             SET signature = ?2, signer_identity = ?3
-             WHERE segment_id = ?1",
-            params![segment_id as i64, signature, signer_identity],
-        )?;
-        if count == 0 {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "UPDATE secure_log_segments
+                 SET signature = ?2, signer_identity = ?3
+                 WHERE segment_id = ?1",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind(1, &SqliteValue::Integer(segment_id as i64))
+            .map_err(anyhow_err)?;
+        stmt.bind_blob_ref(2, signature).map_err(anyhow_err)?;
+        stmt.bind_text_ref(3, signer_identity).map_err(anyhow_err)?;
+        step_done(&mut stmt, "UPDATE secure_log_segments")?;
+        if conn.changes() == 0 {
             anyhow::bail!("segment not found: {}", segment_id);
         }
         Ok(())
     }
 
     fn witness_log_insert(&self, row: &WitnessLogRow) -> anyhow::Result<u64> {
-        self.conn.execute(
-            "INSERT INTO witness_log (
-                stream_id, segment_id, seq_start, seq_end,
-                checkpoint_hash_hex, signature_hex, signer_identity,
-                received_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                row.stream_id,
-                row.segment_id as i64,
-                row.seq_start as i64,
-                row.seq_end as i64,
-                row.checkpoint_hash_hex,
-                row.signature_hex,
-                row.signer_identity,
-                row.received_at_rfc3339,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid() as u64)
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO witness_log (
+                    stream_id, segment_id, seq_start, seq_end,
+                    checkpoint_hash_hex, signature_hex, signer_identity,
+                    received_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, &row.stream_id).map_err(anyhow_err)?;
+        stmt.bind(2, &SqliteValue::Integer(row.segment_id as i64))
+            .map_err(anyhow_err)?;
+        stmt.bind(3, &SqliteValue::Integer(row.seq_start as i64))
+            .map_err(anyhow_err)?;
+        stmt.bind(4, &SqliteValue::Integer(row.seq_end as i64))
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(5, &row.checkpoint_hash_hex)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(6, &row.signature_hex)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(7, &row.signer_identity)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(8, &row.received_at_rfc3339)
+            .map_err(anyhow_err)?;
+        step_done(&mut stmt, "INSERT INTO witness_log")?;
+        Ok(conn.last_insert_rowid() as u64)
     }
 
     fn witness_log_latest(&self, stream_id: &str) -> anyhow::Result<Option<WitnessLogRow>> {
-        self.conn
-            .query_row(
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
                 "SELECT id, stream_id, segment_id, seq_start, seq_end,
                         checkpoint_hash_hex, signature_hex, signer_identity,
                         received_at
                  FROM witness_log WHERE stream_id = ?1
                  ORDER BY id DESC LIMIT 1",
-                params![stream_id],
-                row_to_witness_log_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
+        match stmt.step().map_err(anyhow_err)? {
+            StepResult::Row => Ok(Some(row_to_witness_log_row(&stmt)?)),
+            StepResult::Done => Ok(None),
+        }
     }
 
     fn witness_log_list(&self, stream_id: &str) -> anyhow::Result<Vec<WitnessLogRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, stream_id, segment_id, seq_start, seq_end,
-                    checkpoint_hash_hex, signature_hex, signer_identity,
-                    received_at
-             FROM witness_log WHERE stream_id = ?1 ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![stream_id], row_to_witness_log_row)?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, stream_id, segment_id, seq_start, seq_end,
+                        checkpoint_hash_hex, signature_hex, signer_identity,
+                        received_at
+                 FROM witness_log WHERE stream_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_witness_log_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
 
     fn witness_log_stream_ids(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT stream_id FROM witness_log ORDER BY stream_id")?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT stream_id FROM witness_log ORDER BY stream_id")
+            .map_err(anyhow_err)?;
+        let mut out = Vec::new();
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(read_text(stmt.column_value(0))?),
+                StepResult::Done => break,
+            }
+        }
+        Ok(out)
     }
 
     fn witness_log_gc(
@@ -423,28 +530,49 @@ impl SecureLogStore for SqliteSecureLogStore {
         keep_latest: Option<usize>,
         older_than_rfc3339: Option<&str>,
     ) -> anyhow::Result<usize> {
+        let conn = self.lock()?;
+
         let streams: Vec<String> = if let Some(sid) = stream_id {
             vec![sid.to_string()]
         } else {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT DISTINCT stream_id FROM witness_log")?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
-            rows.collect::<Result<_, _>>()?
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT stream_id FROM witness_log")
+                .map_err(anyhow_err)?;
+            let mut out = Vec::new();
+            loop {
+                match stmt.step().map_err(anyhow_err)? {
+                    StepResult::Row => out.push(read_text(stmt.column_value(0))?),
+                    StepResult::Done => break,
+                }
+            }
+            out
         };
 
         let mut total_deleted = 0usize;
 
         for sid in &streams {
-            let keep_ids: std::collections::HashSet<i64> = if let Some(k) = keep_latest {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id FROM witness_log WHERE stream_id = ?1
-                     ORDER BY id DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![sid, k as i64], |r| r.get(0))?;
-                rows.collect::<Result<_, _>>()?
+            let keep_ids: HashSet<i64> = if let Some(k) = keep_latest {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM witness_log WHERE stream_id = ?1
+                         ORDER BY id DESC LIMIT ?2",
+                    )
+                    .map_err(anyhow_err)?;
+                stmt.bind_text_ref(1, sid).map_err(anyhow_err)?;
+                stmt.bind(2, &SqliteValue::Integer(k as i64))
+                    .map_err(anyhow_err)?;
+                let mut out = HashSet::new();
+                loop {
+                    match stmt.step().map_err(anyhow_err)? {
+                        StepResult::Row => {
+                            out.insert(read_i64(stmt.column_value(0))?);
+                        }
+                        StepResult::Done => break,
+                    }
+                }
+                out
             } else {
-                std::collections::HashSet::new()
+                HashSet::new()
             };
 
             if keep_ids.is_empty() && older_than_rfc3339.is_none() {
@@ -452,26 +580,50 @@ impl SecureLogStore for SqliteSecureLogStore {
             }
 
             let candidates: Vec<i64> = if let Some(cutoff) = older_than_rfc3339 {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id FROM witness_log
-                     WHERE stream_id = ?1 AND received_at < ?2",
-                )?;
-                let rows = stmt.query_map(params![sid, cutoff], |r| r.get(0))?;
-                rows.collect::<Result<_, _>>()?
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM witness_log
+                         WHERE stream_id = ?1 AND received_at < ?2",
+                    )
+                    .map_err(anyhow_err)?;
+                stmt.bind_text_ref(1, sid).map_err(anyhow_err)?;
+                stmt.bind_text_ref(2, cutoff).map_err(anyhow_err)?;
+                let mut out = Vec::new();
+                loop {
+                    match stmt.step().map_err(anyhow_err)? {
+                        StepResult::Row => out.push(read_i64(stmt.column_value(0))?),
+                        StepResult::Done => break,
+                    }
+                }
+                out
             } else {
-                let mut stmt = self
-                    .conn
-                    .prepare("SELECT id FROM witness_log WHERE stream_id = ?1")?;
-                let rows = stmt.query_map(params![sid], |r| r.get(0))?;
-                rows.collect::<Result<_, _>>()?
+                let mut stmt = conn
+                    .prepare("SELECT id FROM witness_log WHERE stream_id = ?1")
+                    .map_err(anyhow_err)?;
+                stmt.bind_text_ref(1, sid).map_err(anyhow_err)?;
+                let mut out = Vec::new();
+                loop {
+                    match stmt.step().map_err(anyhow_err)? {
+                        StepResult::Row => out.push(read_i64(stmt.column_value(0))?),
+                        StepResult::Done => break,
+                    }
+                }
+                out
             };
 
+            let mut del_stmt = conn
+                .prepare("DELETE FROM witness_log WHERE id = ?1")
+                .map_err(anyhow_err)?;
             for id in candidates {
                 if keep_ids.contains(&id) {
                     continue;
                 }
-                self.conn
-                    .execute("DELETE FROM witness_log WHERE id = ?1", params![id])?;
+                del_stmt.reset().map_err(anyhow_err)?;
+                del_stmt.clear_bindings().map_err(anyhow_err)?;
+                del_stmt
+                    .bind(1, &SqliteValue::Integer(id))
+                    .map_err(anyhow_err)?;
+                step_done(&mut del_stmt, "DELETE FROM witness_log")?;
                 total_deleted += 1;
             }
         }
@@ -480,17 +632,21 @@ impl SecureLogStore for SqliteSecureLogStore {
     }
 
     fn secure_log_get(&self, seqno: u64) -> anyhow::Result<Option<SecureLogRow>> {
-        self.conn
-            .query_row(
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
                 "SELECT seqno, stream_id, session_id, boot_id, timestamp,
                         event_type, severity, producer, payload_encoding,
                         payload, prev_entry_hash, entry_hash
                  FROM secure_log WHERE seqno = ?1",
-                params![seqno as i64],
-                row_to_secure_log_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .map_err(anyhow_err)?;
+        stmt.bind(1, &SqliteValue::Integer(seqno as i64))
+            .map_err(anyhow_err)?;
+        match stmt.step().map_err(anyhow_err)? {
+            StepResult::Row => Ok(Some(row_to_secure_log_row(&stmt)?)),
+            StepResult::Done => Ok(None),
+        }
     }
 
     fn secure_log_range(
@@ -499,43 +655,45 @@ impl SecureLogStore for SqliteSecureLogStore {
         from: u64,
         to: u64,
     ) -> anyhow::Result<Vec<SecureLogRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT seqno, stream_id, session_id, boot_id, timestamp,
-                    event_type, severity, producer, payload_encoding,
-                    payload, prev_entry_hash, entry_hash
-             FROM secure_log
-             WHERE stream_id = ?1 AND seqno BETWEEN ?2 AND ?3
-             ORDER BY seqno",
-        )?;
-        let rows = stmt.query_map(
-            params![stream_id, from as i64, to as i64],
-            row_to_secure_log_row,
-        )?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seqno, stream_id, session_id, boot_id, timestamp,
+                        event_type, severity, producer, payload_encoding,
+                        payload, prev_entry_hash, entry_hash
+                 FROM secure_log
+                 WHERE stream_id = ?1 AND seqno BETWEEN ?2 AND ?3
+                 ORDER BY seqno",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
+        stmt.bind(2, &SqliteValue::Integer(from as i64))
+            .map_err(anyhow_err)?;
+        stmt.bind(3, &SqliteValue::Integer(to as i64))
+            .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_secure_log_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
 
     fn secure_log_head(&self, stream_id: &str) -> anyhow::Result<Option<u64>> {
-        self.conn
-            .query_row(
-                "SELECT MAX(seqno) FROM secure_log WHERE stream_id = ?1",
-                params![stream_id],
-                |row| {
-                    let v: Option<i64> = row.get(0)?;
-                    Ok(v.map(|n| n as u64))
-                },
-            )
-            .optional()
-            .map(|r| r.flatten())
-            .map_err(Into::into)
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT MAX(seqno) FROM secure_log WHERE stream_id = ?1")
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
+        read_max_u64(&mut stmt)
     }
 
     fn secure_log_last(&self, stream_id: &str) -> anyhow::Result<Option<SecureLogRow>> {
-        self.conn
-            .query_row(
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
                 "SELECT seqno, stream_id, session_id, boot_id, timestamp,
                         event_type, severity, producer, payload_encoding,
                         payload, prev_entry_hash, entry_hash
@@ -543,64 +701,80 @@ impl SecureLogStore for SqliteSecureLogStore {
                  WHERE stream_id = ?1
                  ORDER BY seqno DESC
                  LIMIT 1",
-                params![stream_id],
-                row_to_secure_log_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
+        match stmt.step().map_err(anyhow_err)? {
+            StepResult::Row => Ok(Some(row_to_secure_log_row(&stmt)?)),
+            StepResult::Done => Ok(None),
+        }
     }
 
     fn secure_log_stream_upsert(&self, row: &SecureLogStreamRow) -> anyhow::Result<()> {
-        self.conn.execute(
-            "INSERT INTO secure_log_streams
-                (name, tier, description, created_at, deprecated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(name) DO UPDATE SET
-                tier = excluded.tier,
-                description = excluded.description,
-                deprecated_at = excluded.deprecated_at",
-            params![
-                row.name,
-                row.tier,
-                row.description,
-                row.created_at_rfc3339,
-                row.deprecated_at_rfc3339,
-            ],
-        )?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "INSERT INTO secure_log_streams
+                    (name, tier, description, created_at, deprecated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(name) DO UPDATE SET
+                    tier = excluded.tier,
+                    description = excluded.description,
+                    deprecated_at = excluded.deprecated_at",
+            )
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, &row.name).map_err(anyhow_err)?;
+        stmt.bind_text_ref(2, &row.tier).map_err(anyhow_err)?;
+        bind_opt_text(&mut stmt, 3, row.description.as_deref())?;
+        stmt.bind_text_ref(4, &row.created_at_rfc3339)
+            .map_err(anyhow_err)?;
+        bind_opt_text(&mut stmt, 5, row.deprecated_at_rfc3339.as_deref())?;
+        step_done(&mut stmt, "INSERT INTO secure_log_streams")?;
         Ok(())
     }
 
     fn secure_log_stream_get(&self, name: &str) -> anyhow::Result<Option<SecureLogStreamRow>> {
-        self.conn
-            .query_row(
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
                 "SELECT name, tier, description, created_at, deprecated_at
                  FROM secure_log_streams WHERE name = ?1",
-                params![name],
-                row_to_stream_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, name).map_err(anyhow_err)?;
+        match stmt.step().map_err(anyhow_err)? {
+            StepResult::Row => Ok(Some(row_to_stream_row(&stmt)?)),
+            StepResult::Done => Ok(None),
+        }
     }
 
     fn secure_log_stream_list(&self) -> anyhow::Result<Vec<SecureLogStreamRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, tier, description, created_at, deprecated_at
-             FROM secure_log_streams ORDER BY name",
-        )?;
-        let rows = stmt.query_map([], row_to_stream_row)?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, tier, description, created_at, deprecated_at
+                 FROM secure_log_streams ORDER BY name",
+            )
+            .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_stream_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
 
     fn secure_log_stream_set_tier(&self, name: &str, tier: &str) -> anyhow::Result<()> {
-        let count = self.conn.execute(
-            "UPDATE secure_log_streams SET tier = ?2 WHERE name = ?1",
-            params![name, tier],
-        )?;
-        if count == 0 {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("UPDATE secure_log_streams SET tier = ?2 WHERE name = ?1")
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, name).map_err(anyhow_err)?;
+        stmt.bind_text_ref(2, tier).map_err(anyhow_err)?;
+        step_done(&mut stmt, "UPDATE secure_log_streams tier")?;
+        if conn.changes() == 0 {
             anyhow::bail!("stream not found: {}", name);
         }
         Ok(())
@@ -611,79 +785,223 @@ impl SecureLogStore for SqliteSecureLogStore {
         name: &str,
         deprecated_at_rfc3339: &str,
     ) -> anyhow::Result<()> {
-        let count = self.conn.execute(
-            "UPDATE secure_log_streams SET deprecated_at = ?2 WHERE name = ?1",
-            params![name, deprecated_at_rfc3339],
-        )?;
-        if count == 0 {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("UPDATE secure_log_streams SET deprecated_at = ?2 WHERE name = ?1")
+            .map_err(anyhow_err)?;
+        stmt.bind_text_ref(1, name).map_err(anyhow_err)?;
+        stmt.bind_text_ref(2, deprecated_at_rfc3339)
+            .map_err(anyhow_err)?;
+        step_done(&mut stmt, "UPDATE secure_log_streams deprecated_at")?;
+        if conn.changes() == 0 {
             anyhow::bail!("stream not found: {}", name);
         }
         Ok(())
     }
 }
 
-fn row_to_stream_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecureLogStreamRow> {
+// ---------------------------------------------------------------------
+// Transaction RAII guard
+// ---------------------------------------------------------------------
+
+struct Tx<'a> {
+    conn: &'a Connection,
+    committed: bool,
+}
+
+impl<'a> Tx<'a> {
+    fn begin(conn: &'a Connection) -> anyhow::Result<Self> {
+        conn.execute_batch("BEGIN;").map_err(anyhow_err)?;
+        Ok(Self {
+            conn,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) -> anyhow::Result<()> {
+        self.conn.execute_batch("COMMIT;").map_err(anyhow_err)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for Tx<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Best-effort rollback; if the conn is already toast SQLite
+            // will refuse and we have nowhere to report it from Drop.
+            let _ = self.conn.execute_batch("ROLLBACK;");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Error + column helpers
+// ---------------------------------------------------------------------
+
+fn anyhow_err(e: SqliteError) -> anyhow::Error {
+    // extended_code carries the finer discrimination (e.g. 2067
+    // UNIQUE, 1555 PRIMARY KEY) callers may want to distinguish;
+    // include it in the message so it survives the Debug bag.
+    anyhow::anyhow!("sqlite ({}/{}): {}", e.code, e.extended_code, e.message)
+}
+
+fn step_done(stmt: &mut Statement<'_>, what: &str) -> anyhow::Result<()> {
+    match stmt.step().map_err(anyhow_err)? {
+        StepResult::Done => Ok(()),
+        StepResult::Row => Err(anyhow::anyhow!(
+            "{} unexpectedly produced a row",
+            what
+        )),
+    }
+}
+
+/// Read the single-row scalar result of a `SELECT MAX(...)` query
+/// (or any other query that yields at most one row whose sole column
+/// is either an INTEGER or NULL). MAX always returns exactly one row
+/// even for empty tables, with the value NULL — mirror that here.
+fn read_max_u64(stmt: &mut Statement<'_>) -> anyhow::Result<Option<u64>> {
+    match stmt.step().map_err(anyhow_err)? {
+        StepResult::Row => match stmt.column_value(0) {
+            SqliteValue::Null => Ok(None),
+            SqliteValue::Integer(n) => Ok(Some(n as u64)),
+            other => Err(anyhow::anyhow!(
+                "expected INTEGER or NULL scalar, got {other:?}"
+            )),
+        },
+        StepResult::Done => Ok(None),
+    }
+}
+
+fn bind_opt_text(
+    stmt: &mut Statement<'_>,
+    idx: i32,
+    v: Option<&str>,
+) -> anyhow::Result<()> {
+    match v {
+        Some(s) => stmt.bind_text_ref(idx, s).map_err(anyhow_err),
+        None => stmt.bind(idx, &SqliteValue::Null).map_err(anyhow_err),
+    }
+}
+
+fn bind_opt_blob(
+    stmt: &mut Statement<'_>,
+    idx: i32,
+    v: Option<&[u8]>,
+) -> anyhow::Result<()> {
+    match v {
+        Some(b) => stmt.bind_blob_ref(idx, b).map_err(anyhow_err),
+        None => stmt.bind(idx, &SqliteValue::Null).map_err(anyhow_err),
+    }
+}
+
+fn read_text(v: SqliteValue) -> anyhow::Result<String> {
+    match v {
+        SqliteValue::Text(s) => Ok(s),
+        other => Err(anyhow::anyhow!("expected TEXT column, got {other:?}")),
+    }
+}
+
+fn read_text_opt(v: SqliteValue) -> anyhow::Result<Option<String>> {
+    match v {
+        SqliteValue::Null => Ok(None),
+        SqliteValue::Text(s) => Ok(Some(s)),
+        other => Err(anyhow::anyhow!(
+            "expected nullable TEXT column, got {other:?}"
+        )),
+    }
+}
+
+fn read_i64(v: SqliteValue) -> anyhow::Result<i64> {
+    match v {
+        SqliteValue::Integer(i) => Ok(i),
+        other => Err(anyhow::anyhow!("expected INTEGER column, got {other:?}")),
+    }
+}
+
+fn read_blob(v: SqliteValue) -> anyhow::Result<Vec<u8>> {
+    match v {
+        SqliteValue::Blob(b) => Ok(b),
+        // SQLite is happy to hand back a BLOB column as an empty text
+        // when the underlying value is zero-length — accept the empty
+        // TEXT arm as an empty blob for robustness.
+        SqliteValue::Text(s) if s.is_empty() => Ok(Vec::new()),
+        other => Err(anyhow::anyhow!("expected BLOB column, got {other:?}")),
+    }
+}
+
+fn read_blob_opt(v: SqliteValue) -> anyhow::Result<Option<Vec<u8>>> {
+    match v {
+        SqliteValue::Null => Ok(None),
+        SqliteValue::Blob(b) => Ok(Some(b)),
+        SqliteValue::Text(s) if s.is_empty() => Ok(Some(Vec::new())),
+        other => Err(anyhow::anyhow!(
+            "expected nullable BLOB column, got {other:?}"
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Row decoders
+// ---------------------------------------------------------------------
+
+fn row_to_stream_row(stmt: &Statement<'_>) -> anyhow::Result<SecureLogStreamRow> {
     Ok(SecureLogStreamRow {
-        name: row.get(0)?,
-        tier: row.get(1)?,
-        description: row.get(2)?,
-        created_at_rfc3339: row.get(3)?,
-        deprecated_at_rfc3339: row.get(4)?,
+        name: read_text(stmt.column_value(0))?,
+        tier: read_text(stmt.column_value(1))?,
+        description: read_text_opt(stmt.column_value(2))?,
+        created_at_rfc3339: read_text(stmt.column_value(3))?,
+        deprecated_at_rfc3339: read_text_opt(stmt.column_value(4))?,
     })
 }
 
-fn row_to_witness_log_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WitnessLogRow> {
+fn row_to_witness_log_row(stmt: &Statement<'_>) -> anyhow::Result<WitnessLogRow> {
     Ok(WitnessLogRow {
-        id: Some(row.get::<_, i64>(0)?),
-        stream_id: row.get(1)?,
-        segment_id: row.get::<_, i64>(2)? as u64,
-        seq_start: row.get::<_, i64>(3)? as u64,
-        seq_end: row.get::<_, i64>(4)? as u64,
-        checkpoint_hash_hex: row.get(5)?,
-        signature_hex: row.get(6)?,
-        signer_identity: row.get(7)?,
-        received_at_rfc3339: row.get(8)?,
+        id: Some(read_i64(stmt.column_value(0))?),
+        stream_id: read_text(stmt.column_value(1))?,
+        segment_id: read_i64(stmt.column_value(2))? as u64,
+        seq_start: read_i64(stmt.column_value(3))? as u64,
+        seq_end: read_i64(stmt.column_value(4))? as u64,
+        checkpoint_hash_hex: read_text(stmt.column_value(5))?,
+        signature_hex: read_text(stmt.column_value(6))?,
+        signer_identity: read_text(stmt.column_value(7))?,
+        received_at_rfc3339: read_text(stmt.column_value(8))?,
     })
 }
 
-fn row_to_segment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecureLogSegmentRow> {
+fn row_to_segment_row(stmt: &Statement<'_>) -> anyhow::Result<SecureLogSegmentRow> {
     Ok(SecureLogSegmentRow {
-        segment_id: Some(row.get::<_, i64>(0)? as u64),
-        stream_id: row.get(1)?,
-        seq_start: row.get::<_, i64>(2)? as u64,
-        seq_end: row.get::<_, i64>(3)? as u64,
-        merkle_root: row.get(4)?,
-        last_entry_hash: row.get(5)?,
-        prev_checkpoint_hash: row.get(6)?,
-        closed_at_rfc3339: row.get(7)?,
-        signature: row.get(8)?,
-        signer_identity: row.get(9)?,
+        segment_id: Some(read_i64(stmt.column_value(0))? as u64),
+        stream_id: read_text(stmt.column_value(1))?,
+        seq_start: read_i64(stmt.column_value(2))? as u64,
+        seq_end: read_i64(stmt.column_value(3))? as u64,
+        merkle_root: read_blob(stmt.column_value(4))?,
+        last_entry_hash: read_blob(stmt.column_value(5))?,
+        prev_checkpoint_hash: read_blob(stmt.column_value(6))?,
+        closed_at_rfc3339: read_text(stmt.column_value(7))?,
+        signature: read_blob_opt(stmt.column_value(8))?,
+        signer_identity: read_text_opt(stmt.column_value(9))?,
     })
 }
 
-fn row_to_secure_log_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecureLogRow> {
-    let seqno: i64 = row.get(0)?;
-    let severity_text: String = row.get(6)?;
-    let severity = Severity::try_from(severity_text.as_str()).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            6,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
-        )
-    })?;
+fn row_to_secure_log_row(stmt: &Statement<'_>) -> anyhow::Result<SecureLogRow> {
+    let seqno = read_i64(stmt.column_value(0))?;
+    let severity_text = read_text(stmt.column_value(6))?;
+    let severity = Severity::try_from(severity_text.as_str())
+        .map_err(|e| anyhow::anyhow!("bad severity in secure_log column 6: {e}"))?;
     Ok(SecureLogRow {
         seqno: Some(seqno as u64),
-        stream_id: row.get(1)?,
-        session_id: row.get(2)?,
-        boot_id: row.get(3)?,
-        timestamp_rfc3339: row.get(4)?,
-        event_type: row.get(5)?,
+        stream_id: read_text(stmt.column_value(1))?,
+        session_id: read_text(stmt.column_value(2))?,
+        boot_id: read_text(stmt.column_value(3))?,
+        timestamp_rfc3339: read_text(stmt.column_value(4))?,
+        event_type: read_text(stmt.column_value(5))?,
         severity,
-        producer: row.get(7)?,
-        payload_encoding: row.get(8)?,
-        payload: row.get(9)?,
-        prev_entry_hash: row.get(10)?,
-        entry_hash: row.get(11)?,
+        producer: read_text(stmt.column_value(7))?,
+        payload_encoding: read_text(stmt.column_value(8))?,
+        payload: read_blob(stmt.column_value(9))?,
+        prev_entry_hash: read_blob(stmt.column_value(10))?,
+        entry_hash: read_blob(stmt.column_value(11))?,
     })
 }
 
