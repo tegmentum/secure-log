@@ -23,11 +23,14 @@ jobs:
       # local path (`../../../sqlink/sqlite-wasm/core`), which expects sqlink
       # as a sibling checkout. actions/checkout can't place a repo outside
       # $GITHUB_WORKSPACE, so clone it directly. `sqlite-wasm` is a git
-      # submodule inside sqlink, so recurse. Floats on sqlink's default
-      # branch by design — the two repos evolve together.
+      # submodule inside sqlink, so recurse. Rewrite any nested git@github.com:
+      # submodule URLs to https so unauthenticated CI can fetch them (Track B's
+      # .gitmodules declares sqlite-wit with an ssh URL). Floats on sqlink's
+      # default branch by design — the two repos evolve together.
       - name: Clone sqlink sibling
         working-directory: ${{ github.workspace }}/..
         run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
           git clone --depth 1 --recurse-submodules --shallow-submodules \
             https://github.com/tegmentum/sqlink.git sqlink
 
