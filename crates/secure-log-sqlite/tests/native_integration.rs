@@ -490,8 +490,7 @@ fn list_streams_returns_created() {
     log.create_stream("c", "highly-restricted", None).unwrap();
 
     let listed = log.list_streams().unwrap();
-    let names: std::collections::HashSet<_> =
-        listed.iter().map(|s| s.name.as_str()).collect();
+    let names: std::collections::HashSet<_> = listed.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains("a"));
     assert!(names.contains("b"));
     assert!(names.contains("c"));
