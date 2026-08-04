@@ -446,6 +446,101 @@ fn open_payload_passes_through_plaintext_entries() {
 }
 
 #[test]
+fn create_stream_upserts() {
+    // First call inserts, second call updates in place. Both round
+    // trip through list_streams; the tier from the second call wins.
+    // The SqliteSecureLogStore pre-seeds a "default" stream in M4, so
+    // we look up "secrets" by name rather than asserting list length.
+    let log = new_log();
+
+    log.create_stream("secrets", "protected", Some("initial"))
+        .unwrap();
+    let listed = log.list_streams().unwrap();
+    let row = listed
+        .iter()
+        .find(|s| s.name == "secrets")
+        .expect("secrets stream should be listed");
+    assert_eq!(row.tier, "protected");
+    assert_eq!(row.description.as_deref(), Some("initial"));
+    assert_eq!(row.deprecated_at, None);
+
+    // Same name, upgraded tier — upsert semantics: row is updated,
+    // not duplicated. Count of rows named "secrets" stays at 1.
+    log.create_stream("secrets", "highly-restricted", Some("promoted"))
+        .unwrap();
+    let listed = log.list_streams().unwrap();
+    let secrets_rows: Vec<_> = listed.iter().filter(|s| s.name == "secrets").collect();
+    assert_eq!(
+        secrets_rows.len(),
+        1,
+        "create_stream must upsert, not duplicate"
+    );
+    assert_eq!(secrets_rows[0].tier, "highly-restricted");
+    assert_eq!(secrets_rows[0].description.as_deref(), Some("promoted"));
+}
+
+#[test]
+fn list_streams_returns_created() {
+    // Multiple explicit creates + one implicit (via append) all
+    // surface in list_streams. Order isn't asserted (backend-defined),
+    // but the set is.
+    let log = new_log();
+    log.create_stream("a", "public", None).unwrap();
+    log.create_stream("b", "protected", Some("b-desc")).unwrap();
+    log.create_stream("c", "highly-restricted", None).unwrap();
+
+    let listed = log.list_streams().unwrap();
+    let names: std::collections::HashSet<_> =
+        listed.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains("a"));
+    assert!(names.contains("b"));
+    assert!(names.contains("c"));
+
+    // Verify one row's fields carried through correctly.
+    let b = listed.iter().find(|s| s.name == "b").unwrap();
+    assert_eq!(b.tier, "protected");
+    assert_eq!(b.description.as_deref(), Some("b-desc"));
+    assert_eq!(b.deprecated_at, None);
+}
+
+#[test]
+fn deprecate_stream_rejects_subsequent_append() {
+    // append succeeds pre-deprecation; deprecate stamps a timestamp
+    // that surfaces in list_streams; post-deprecate appends fail.
+    let log = new_log();
+    log.create_stream("archive-me", "public", None).unwrap();
+    log.append("archive-me", "e", Severity::Info, "t", b"hi")
+        .unwrap();
+
+    log.deprecate_stream("archive-me").unwrap();
+
+    let listed = log.list_streams().unwrap();
+    let row = listed.iter().find(|s| s.name == "archive-me").unwrap();
+    assert!(
+        row.deprecated_at.is_some(),
+        "deprecate_stream should stamp a deprecated_at timestamp"
+    );
+
+    // New append rejected.
+    let err = log
+        .append("archive-me", "e", Severity::Info, "t", b"post")
+        .unwrap_err();
+    match err {
+        SecureLogError::Invalid(msg) => {
+            assert!(
+                msg.contains("deprecated"),
+                "expected deprecation message, got: {msg}"
+            );
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+
+    // Existing entry still readable.
+    let e = log.read(1).unwrap();
+    assert_eq!(e.payload, b"hi");
+}
+
+#[test]
 fn verify_chain_detects_content_drift_via_recompute() {
     let log = new_log();
     let r = log

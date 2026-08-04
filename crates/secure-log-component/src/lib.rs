@@ -27,7 +27,7 @@ use bindings::exports::secure_log::log::encoder::{
 };
 use bindings::exports::secure_log::log::log::{
     self, AppendResult as WAppendResult, InclusionProof as WInclusionProof,
-    ProofStep as WProofStep, SegmentInfo as WSegmentInfo,
+    ProofStep as WProofStep, SegmentInfo as WSegmentInfo, StreamInfo as WStreamInfo,
 };
 // Imported keystore: the signing key lives in whatever provider is
 // composed in; only the handle + public key cross this boundary.
@@ -478,6 +478,15 @@ fn checkpoint_from_w(f: WCheckpointFields) -> secure_log::CheckpointFields {
     }
 }
 
+fn stream_info_to_w(s: secure_log::StreamInfo) -> WStreamInfo {
+    WStreamInfo {
+        name: s.name,
+        tier: s.tier,
+        description: s.description,
+        deprecated_at: s.deprecated_at,
+    }
+}
+
 fn segment_info_to_w(s: secure_log::SegmentInfo) -> WSegmentInfo {
     WSegmentInfo {
         segment_id: s.segment_id,
@@ -646,6 +655,25 @@ impl log::Guest for Component {
         let core_proof = proof_from_w(proof)?;
         let root = digest_from_vec(expected_root)?;
         secure_log::verify_inclusion_proof(&core_proof, &root).map_err(|e| e.to_string())
+    }
+
+    fn create_stream(
+        stream_id: String,
+        tier: String,
+        description: Option<String>,
+    ) -> Result<(), String> {
+        with_log(|log| log.create_stream(&stream_id, &tier, description.as_deref()))
+            .map_err(|e| e.to_string())
+    }
+
+    fn list_streams() -> Result<Vec<WStreamInfo>, String> {
+        with_log(|log| log.list_streams())
+            .map(|v| v.into_iter().map(stream_info_to_w).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    fn deprecate_stream(stream_id: String) -> Result<(), String> {
+        with_log(|log| log.deprecate_stream(&stream_id)).map_err(|e| e.to_string())
     }
 }
 

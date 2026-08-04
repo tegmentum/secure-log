@@ -120,6 +120,26 @@ interface log {
         entry-hash: list<u8>,
     }
 
+    // Public projection of a stream's metadata, returned by
+    // `list-streams`. Callers isolate live vs archived streams by
+    // filtering on `deprecated-at.is-some`.
+    //
+    // Fields:
+    //   name          — the stream identifier, as passed to `append`.
+    //   tier          — confidentiality tier as a stable string
+    //                   (`"public"`, `"protected"`, or
+    //                   `"highly-restricted"`).
+    //   description   — free-form human note captured at
+    //                   `create-stream` time, if any.
+    //   deprecated-at — unix seconds when the stream was deprecated,
+    //                   or none for live streams.
+    record stream-info {
+        name:          string,
+        tier:          string,
+        description:   option<string>,
+        deprecated-at: option<u64>,
+    }
+
     // A closed segment with a Merkle root over its entries.
     record segment-info {
         segment-id:           u64,
@@ -219,6 +239,48 @@ interface log {
         proof:         inclusion-proof,
         expected-root: list<u8>,
     ) -> result<_, string>;
+
+    // Create or update a stream's metadata (tier + description).
+    //
+    // Streams also come into existence lazily on first `append`; the
+    // row created that way defaults to `tier = "public"`. Explicit
+    // `create-stream` lets an operator pin a tier BEFORE any appends
+    // land — required for Phase-5 AEAD derivation because a
+    // mid-stream tier flip would silently invalidate every prior
+    // entry's decrypt key (the KDF label is different for
+    // `highly-restricted` vs `public`).
+    //
+    // Idempotent: a second call with the same (`tier`, `description`)
+    // is a no-op on the resulting state. Backends that don't track
+    // stream metadata return `err("stream lifecycle not supported")`.
+    create-stream: func(
+        stream-id:   string,
+        tier:        string,
+        description: option<string>,
+    ) -> result<_, string>;
+
+    // Enumerate every stream known to the backend, including
+    // deprecated ones. Callers isolate live vs archived by filtering
+    // on `deprecated-at.is-some`.
+    //
+    // Order is backend-defined; the canonical native impl returns
+    // rows in the order the store returns them (typically creation
+    // order for the SQLite backend). Backends that don't track
+    // streams return the empty list — safest fallback so callers can
+    // treat "no streams" and "stream tracking unsupported"
+    // identically.
+    list-streams: func() -> result<list<stream-info>, string>;
+
+    // Soft-delete a stream: subsequent `append` calls against it are
+    // rejected with `err("stream '...' is deprecated ...")`. Existing
+    // entries remain readable and the hash chain is unchanged, so
+    // verification and inclusion proofs continue to work; only new
+    // appends are blocked.
+    //
+    // The deprecation timestamp is stamped by the backend at call
+    // time. Backends that don't track stream metadata return
+    // `err("stream lifecycle not supported")`.
+    deprecate-stream: func(stream-id: string) -> result<_, string>;
 }
 
 // ---------------------------------------------------------------------

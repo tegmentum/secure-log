@@ -160,6 +160,32 @@ pub struct AppendResult {
     pub entry_hash: EntryDigest,
 }
 
+/// Public metadata for a stream, surfaced by
+/// [`SecureLog::list_streams`](super::SecureLog::list_streams).
+///
+/// This is the caller-visible projection of a
+/// [`SecureLogStreamRow`](super::store::SecureLogStreamRow) — the row
+/// carries store-facing detail (RFC3339 `created_at`, on-disk column
+/// order) that lifecycle callers don't need. `deprecated_at` is
+/// surfaced as an `Option<u64>` unix-seconds timestamp so consumers
+/// can trivially filter live vs archived without RFC3339 parsing.
+///
+/// Fields:
+/// - `name` — the stream identifier as passed to `append` / `head`.
+/// - `tier` — the confidentiality tier as a stable string
+///   (`"public"`, `"protected"`, `"highly-restricted"`).
+/// - `description` — free-form human note captured at
+///   `create_stream` time, if any.
+/// - `deprecated_at` — unix seconds when the stream was deprecated,
+///   or `None` for live streams.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamInfo {
+    pub name: String,
+    pub tier: String,
+    pub description: Option<String>,
+    pub deprecated_at: Option<u64>,
+}
+
 /// A closed segment with its Merkle root and optional TPM signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentInfo {

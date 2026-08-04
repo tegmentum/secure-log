@@ -56,7 +56,7 @@ pub use encoder::{CanonicalEncoder, CborEncoder, ENCODER_CBOR};
 pub use hash::{sha256, EntryDigest, HASH_LEN, ZERO_HASH};
 pub use model::{
     AppendResult, CheckpointFields, EntryFields, InclusionProof, ProofStep, SecureLogError,
-    SegmentInfo, Severity, CHECKPOINT_VERSION, ENTRY_VERSION,
+    SegmentInfo, Severity, StreamInfo, CHECKPOINT_VERSION, ENTRY_VERSION,
 };
 pub use native::NativeSecureLog;
 pub use signer::{CheckpointSigner, SignerError};
@@ -144,6 +144,72 @@ pub trait SecureLog: Send {
 
     /// Build an inclusion proof for an entry within its segment.
     fn inclusion_proof(&self, seqno: u64) -> Result<InclusionProof, SecureLogError>;
+
+    /// Create or update a stream's metadata (tier + description).
+    ///
+    /// If the stream doesn't exist, it's created; if it does, the row
+    /// is updated. Idempotent — calling twice with the same
+    /// (`tier`, `description`) is a no-op on the resulting state.
+    ///
+    /// Streams also come into existence lazily on first
+    /// [`append`](Self::append), but the row created that way defaults
+    /// to `tier = "public"` and no description. Explicit
+    /// `create_stream` lets an operator pin a tier BEFORE any appends
+    /// land — which drives Phase-5 AEAD derivation for encrypted
+    /// streams (`highly-restricted` binds the derived segment key to a
+    /// different KDF label than `public`, and a mid-stream tier flip
+    /// would silently invalidate every prior entry's decrypt key).
+    ///
+    /// Default impl returns
+    /// `Err(Invalid("stream lifecycle not supported"))`; backends that
+    /// expose stream metadata (as the SQLite-backed
+    /// [`NativeSecureLog`] does) override.
+    fn create_stream(
+        &self,
+        stream_id: &str,
+        tier: &str,
+        description: Option<&str>,
+    ) -> Result<(), SecureLogError> {
+        let _ = (stream_id, tier, description);
+        Err(SecureLogError::Invalid(
+            "stream lifecycle not supported by this backend".into(),
+        ))
+    }
+
+    /// Enumerate every stream known to the backend, including
+    /// deprecated ones.
+    ///
+    /// Callers isolate live vs archived by filtering on
+    /// `deprecated_at.is_some()`. Order is backend-defined; the
+    /// canonical native impl returns rows in the order the store
+    /// returns them (typically creation order for the SQLite backend).
+    ///
+    /// Default impl returns `Ok(vec![])` — the safest fallback for
+    /// backends that don't track streams. Following the
+    /// `append_with_encoding` pattern, backends that DO track streams
+    /// override; older backends compiled against a pre-lifecycle
+    /// trait keep working.
+    fn list_streams(&self) -> Result<Vec<StreamInfo>, SecureLogError> {
+        Ok(Vec::new())
+    }
+
+    /// Soft-delete a stream: subsequent appends are rejected with
+    /// `Invalid("stream '<id>' is deprecated ...")`. Existing entries
+    /// remain readable and their hash chain is unchanged, so
+    /// verification continues to work; only new appends are blocked.
+    ///
+    /// The deprecation timestamp is stamped by the backend at call
+    /// time (backends record it in whatever wall-clock form they
+    /// prefer; the trait doesn't dictate the format).
+    ///
+    /// Default impl returns
+    /// `Err(Invalid("stream lifecycle not supported"))`.
+    fn deprecate_stream(&self, stream_id: &str) -> Result<(), SecureLogError> {
+        let _ = stream_id;
+        Err(SecureLogError::Invalid(
+            "stream lifecycle not supported by this backend".into(),
+        ))
+    }
 }
 
 /// Verify a standalone inclusion proof against an expected Merkle root.

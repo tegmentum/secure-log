@@ -29,10 +29,10 @@ use crate::hash::{hex, sha256, EntryDigest, HASH_LEN, ZERO_HASH};
 use crate::merkle;
 use crate::model::{
     digest_from_vec, AppendResult, EntryFields, InclusionProof, ProofStep, SecureLogError,
-    SegmentInfo, Severity, ENTRY_VERSION,
+    SegmentInfo, Severity, StreamInfo, ENTRY_VERSION,
 };
 use crate::signer::CheckpointSigner;
-use crate::store::{SecureLogRow, SecureLogSegmentRow, SecureLogStore};
+use crate::store::{SecureLogRow, SecureLogSegmentRow, SecureLogStore, SecureLogStreamRow};
 use crate::witness::{HeadFile, HeadRecord};
 use crate::SecureLog;
 
@@ -1170,6 +1170,68 @@ impl SecureLog for NativeSecureLog {
             merkle_root: root,
             path,
         })
+    }
+
+    /// Delegate stream creation to
+    /// [`SecureLogStore::secure_log_stream_upsert`]. Idempotent by
+    /// definition of the underlying primitive: a second call with the
+    /// same key overwrites the tier + description, which is the
+    /// documented "create-or-update" contract of `create_stream`.
+    ///
+    /// The `created_at_rfc3339` field is stamped only on the initial
+    /// insert path by the SQLite backend's upsert; a subsequent call
+    /// updates tier + description in place but does not rewrite
+    /// `created_at`. See `SqliteSecureLogStore::secure_log_stream_upsert`.
+    fn create_stream(
+        &self,
+        stream_id: &str,
+        tier: &str,
+        description: Option<&str>,
+    ) -> Result<(), SecureLogError> {
+        let row = SecureLogStreamRow {
+            name: stream_id.to_string(),
+            tier: tier.to_string(),
+            description: description.map(str::to_string),
+            created_at_rfc3339: Utc::now().to_rfc3339(),
+            deprecated_at_rfc3339: None,
+        };
+        self.store
+            .secure_log_stream_upsert(&row)
+            .map_err(|e| SecureLogError::Storage(e.to_string()))
+    }
+
+    fn list_streams(&self) -> Result<Vec<StreamInfo>, SecureLogError> {
+        let rows = self
+            .store
+            .secure_log_stream_list()
+            .map_err(|e| SecureLogError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(stream_row_to_info).collect())
+    }
+
+    fn deprecate_stream(&self, stream_id: &str) -> Result<(), SecureLogError> {
+        let ts = Utc::now().to_rfc3339();
+        self.store
+            .secure_log_stream_deprecate(stream_id, &ts)
+            .map_err(|e| SecureLogError::Storage(e.to_string()))
+    }
+}
+
+/// Project a store-facing [`SecureLogStreamRow`] to the caller-visible
+/// [`StreamInfo`]. `deprecated_at_rfc3339` is parsed to unix seconds;
+/// unparseable values (shouldn't happen — the store owns the format)
+/// yield `None` rather than an error, keeping `list_streams`
+/// non-fallible for its callers.
+fn stream_row_to_info(row: SecureLogStreamRow) -> StreamInfo {
+    let deprecated_at = row.deprecated_at_rfc3339.as_deref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp() as u64)
+    });
+    StreamInfo {
+        name: row.name,
+        tier: row.tier,
+        description: row.description,
+        deprecated_at,
     }
 }
 
