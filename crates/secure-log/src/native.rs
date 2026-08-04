@@ -762,37 +762,30 @@ impl NativeSecureLog {
             prev_entry_hash: row.prev_entry_hash.clone(),
         })
     }
-}
 
-/// Platform-specific boot identifier lookup. Falls back to a random
-/// per-process value so the field is always populated.
-fn detect_boot_id() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
-            return s.trim().to_string();
-        }
-    }
-    // Fallback: one random id per process lifetime.
-    format!("rand-{}", Uuid::new_v4())
-}
-
-impl SecureLog for NativeSecureLog {
-    fn append(
+    /// Shared body for `SecureLog::append` +
+    /// `SecureLog::append_with_encoding`. Composes the
+    /// `EntryFields` record, canonicalizes it via `self.encoder`,
+    /// hashes the canonical bytes into `entry_hash`, and inserts.
+    ///
+    /// The one thing the two callers vary on is
+    /// `payload_encoding_tag` — `append` passes
+    /// `self.encoder.name()`, `append_with_encoding` passes the
+    /// caller's chosen tag verbatim. The tag is stamped into both
+    /// the sealed row AND the hashed canonical bytes, so a
+    /// caller-supplied tag participates in chain integrity just
+    /// like an encoder-default tag would.
+    fn append_inner(
         &self,
         stream_id: &str,
         event_type: &str,
         severity: Severity,
         producer: &str,
         payload: &[u8],
+        payload_encoding_tag: &str,
     ) -> Result<AppendResult, SecureLogError> {
-        // Reject appends to deprecated streams. Deprecation is a
-        // soft delete — existing entries remain verifiable, but
-        // the write channel is closed.
         self.reject_if_deprecated(stream_id)?;
 
-        // Chain continuity is per-stream: look up the last entry in
-        // THIS stream, regardless of what other streams have done.
         let prev_hash: EntryDigest = match self
             .store
             .secure_log_last(stream_id)
@@ -802,13 +795,6 @@ impl SecureLog for NativeSecureLog {
             None => ZERO_HASH,
         };
 
-        // Seqno namespace is GLOBAL across all streams so every row
-        // has a unique primary key, but it's monotonic: each new
-        // entry gets (global_max + 1). Per-stream sequences may be
-        // sparse as a result, which is fine because chain hash links
-        // are what enforce ordering, not integer contiguity.
-        //
-        // For a single-stream workload the seqnos are contiguous.
         let next_seqno = self
             .store
             .secure_log_global_head()
@@ -827,7 +813,7 @@ impl SecureLog for NativeSecureLog {
             event_type: event_type.to_string(),
             severity,
             producer: producer.to_string(),
-            payload_encoding: self.encoder.name().to_string(),
+            payload_encoding: payload_encoding_tag.to_string(),
             payload: payload.to_vec(),
             prev_entry_hash: prev_hash.to_vec(),
         };
@@ -854,9 +840,6 @@ impl SecureLog for NativeSecureLog {
             .secure_log_insert(&row)
             .map_err(|e| SecureLogError::Storage(e.to_string()))?;
 
-        // Defensive: if the store somehow reassigned the seqno, that
-        // would invalidate our hash. Reject rather than silently
-        // lying about what was stored.
         if assigned != next_seqno {
             return Err(SecureLogError::Storage(format!(
                 "store assigned seqno {} but we committed {} in the hash",
@@ -868,6 +851,69 @@ impl SecureLog for NativeSecureLog {
             seqno: next_seqno,
             entry_hash,
         })
+    }
+}
+
+/// Platform-specific boot identifier lookup. Falls back to a random
+/// per-process value so the field is always populated.
+fn detect_boot_id() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+            return s.trim().to_string();
+        }
+    }
+    // Fallback: one random id per process lifetime.
+    format!("rand-{}", Uuid::new_v4())
+}
+
+impl SecureLog for NativeSecureLog {
+    fn append(
+        &self,
+        stream_id: &str,
+        event_type: &str,
+        severity: Severity,
+        producer: &str,
+        payload: &[u8],
+    ) -> Result<AppendResult, SecureLogError> {
+        // Delegate to the shared inner impl with the encoder's own
+        // name as the payload_encoding tag — the pre-`append_with_encoding`
+        // default behavior.
+        let encoder_name = self.encoder.name().to_string();
+        self.append_inner(
+            stream_id,
+            event_type,
+            severity,
+            producer,
+            payload,
+            &encoder_name,
+        )
+    }
+
+    fn append_with_encoding(
+        &self,
+        stream_id: &str,
+        event_type: &str,
+        severity: Severity,
+        producer: &str,
+        payload: &[u8],
+        payload_encoding: &str,
+    ) -> Result<AppendResult, SecureLogError> {
+        // Mirror `append`, but stamp the caller-supplied
+        // `payload_encoding` tag into the sealed row (and hash it
+        // into the chain) instead of the encoder's default name.
+        // Consumers like `wasmos-audit-provider` use this to route
+        // verifier dispatch on the ADR-0016 `wasmos-audit-cbor-v1`
+        // tag even though the on-disk canonical-encoder identity is
+        // still `"cbor"`.
+        self.append_inner(
+            stream_id,
+            event_type,
+            severity,
+            producer,
+            payload,
+            payload_encoding,
+        )
     }
 
     fn read(&self, seqno: u64) -> Result<EntryFields, SecureLogError> {

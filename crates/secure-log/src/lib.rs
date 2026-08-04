@@ -88,6 +88,39 @@ pub trait SecureLog: Send {
         payload: &[u8],
     ) -> Result<AppendResult, SecureLogError>;
 
+    /// Append with an explicit `payload_encoding` override. The
+    /// stamped tag lands verbatim in the sealed row (and is hashed
+    /// into the chain), instead of the default value derived from
+    /// the impl's canonical encoder identity.
+    ///
+    /// Consumers that layer their own on-payload encoding (e.g.
+    /// `wasmos:audit@0.1.0/audit` which wraps events in the ADR-0016
+    /// `wasmos-audit-cbor-v1` envelope before calling `append`)
+    /// pass the wire tag here so verifiers can dispatch decoding on
+    /// the appropriate schema.
+    ///
+    /// The default impl ignores `payload_encoding` and delegates to
+    /// [`append`](Self::append) — backwards-compatible with impls
+    /// that predate this method. Impls that want to honor the
+    /// override MUST override this method.
+    ///
+    /// # Errors
+    ///
+    /// Same failure surface as [`append`](Self::append).
+    fn append_with_encoding(
+        &self,
+        stream_id: &str,
+        event_type: &str,
+        severity: Severity,
+        producer: &str,
+        payload: &[u8],
+        _payload_encoding: &str,
+    ) -> Result<AppendResult, SecureLogError> {
+        // Default: ignore the override, delegate to append.
+        // NativeSecureLog overrides this method to honor the tag.
+        self.append(stream_id, event_type, severity, producer, payload)
+    }
+
     /// Read a single entry by sequence number.
     fn read(&self, seqno: u64) -> Result<EntryFields, SecureLogError>;
 

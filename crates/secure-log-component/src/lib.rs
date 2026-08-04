@@ -574,6 +574,32 @@ impl log::Guest for Component {
             .map_err(|e| e.to_string())
     }
 
+    fn append_with_encoding(
+        stream_id: String,
+        event_type: String,
+        severity: log::Severity,
+        producer: String,
+        payload: Vec<u8>,
+        payload_encoding: String,
+    ) -> Result<WAppendResult, String> {
+        let sev = log_sev_to_core(severity);
+        with_log(|log| {
+            log.append_with_encoding(
+                &stream_id,
+                &event_type,
+                sev,
+                &producer,
+                &payload,
+                &payload_encoding,
+            )
+        })
+        .map(|r| WAppendResult {
+            seqno: r.seqno,
+            entry_hash: r.entry_hash.to_vec(),
+        })
+        .map_err(|e| e.to_string())
+    }
+
     fn read(seqno: u64) -> Result<WEntryFields, String> {
         with_log(|log| log.read(seqno))
             .map(entry_to_w)

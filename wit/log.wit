@@ -161,6 +161,31 @@ interface log {
         payload:      list<u8>,
     ) -> result<append-result, string>;
 
+    // Append with an explicit `payload-encoding` override — the
+    // stamped tag lands verbatim in the sealed row (and is hashed
+    // into the chain), instead of the default value derived from
+    // the backend's canonical encoder identity.
+    //
+    // Consumers that layer their own on-payload encoding (e.g.
+    // `wasmos:audit@0.1.0/audit`, which wraps events in the ADR-0016
+    // `wasmos-audit-cbor-v1` envelope before appending) pass the
+    // wire tag here so verifiers can dispatch decoding on the
+    // right schema — the on-disk canonical-encoder identity stays
+    // whatever the backend picked (typically `"cbor"`).
+    //
+    // Backends that predate this method can preserve source
+    // compatibility by treating the call as an `append` and
+    // ignoring `payload-encoding`; the Rust trait's default impl
+    // does exactly that.
+    append-with-encoding: func(
+        stream-id:        string,
+        event-type:       string,
+        severity:         severity,
+        producer:         string,
+        payload:          list<u8>,
+        payload-encoding: string,
+    ) -> result<append-result, string>;
+
     // Read a single entry by sequence number.
     read: func(seqno: u64) -> result<entry-fields, string>;
 
