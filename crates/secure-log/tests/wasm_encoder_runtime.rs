@@ -26,8 +26,11 @@
 use std::path::PathBuf;
 
 use secure_log::{
-    encoder::CborEncoder, hash::ZERO_HASH, model::ENTRY_VERSION,
-    wasm_encoder::WasmCanonicalEncoder, CanonicalEncoder, CheckpointFields, EntryFields, Severity,
+    encoder::CborEncoder,
+    hash::ZERO_HASH,
+    model::ENTRY_VERSION,
+    wasm_encoder::WasmCanonicalEncoder,
+    CanonicalEncoder, CheckpointFields, EntryFields, Severity,
 };
 
 fn locate_component() -> Option<PathBuf> {
@@ -94,8 +97,7 @@ fn wasm_encoder_matches_native_for_every_severity() {
         let wasm_bytes = wasm.encode_entry(&entry);
         let native_bytes = native.encode_entry(&entry);
         assert_eq!(
-            wasm_bytes,
-            native_bytes,
+            wasm_bytes, native_bytes,
             "severity {severity:?}: wasm encoder produced different bytes than native \
              (wasm={} bytes, native={} bytes) — the hash chain would not reproduce",
             wasm_bytes.len(),

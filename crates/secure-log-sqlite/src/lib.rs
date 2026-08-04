@@ -252,8 +252,7 @@ impl SecureLogStore for SqliteSecureLogStore {
         stmt.bind_blob_ref(10, &row.payload).map_err(anyhow_err)?;
         stmt.bind_blob_ref(11, &row.prev_entry_hash)
             .map_err(anyhow_err)?;
-        stmt.bind_blob_ref(12, &row.entry_hash)
-            .map_err(anyhow_err)?;
+        stmt.bind_blob_ref(12, &row.entry_hash).map_err(anyhow_err)?;
         step_done(&mut stmt, "INSERT INTO secure_log")?;
         Ok(seqno)
     }
@@ -289,8 +288,7 @@ impl SecureLogStore for SqliteSecureLogStore {
                 .map_err(anyhow_err)?;
             stmt.bind(3, &SqliteValue::Integer(row.seq_end as i64))
                 .map_err(anyhow_err)?;
-            stmt.bind_blob_ref(4, &row.merkle_root)
-                .map_err(anyhow_err)?;
+            stmt.bind_blob_ref(4, &row.merkle_root).map_err(anyhow_err)?;
             stmt.bind_blob_ref(5, &row.last_entry_hash)
                 .map_err(anyhow_err)?;
             stmt.bind_blob_ref(6, &row.prev_checkpoint_hash)
@@ -363,8 +361,11 @@ impl SecureLogStore for SqliteSecureLogStore {
             .map_err(anyhow_err)?;
         stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
         let mut out = Vec::new();
-        while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-            out.push(row_to_segment_row(&stmt)?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_segment_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
@@ -389,9 +390,14 @@ impl SecureLogStore for SqliteSecureLogStore {
         stmt.bind(1, &SqliteValue::Integer(segment_id as i64))
             .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-            let n = read_i64(stmt.column_value(0))?;
-            out.push(n as u64);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => {
+                    let n = read_i64(stmt.column_value(0))?;
+                    out.push(n as u64);
+                }
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
@@ -494,8 +500,11 @@ impl SecureLogStore for SqliteSecureLogStore {
             .map_err(anyhow_err)?;
         stmt.bind_text_ref(1, stream_id).map_err(anyhow_err)?;
         let mut out = Vec::new();
-        while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-            out.push(row_to_witness_log_row(&stmt)?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_witness_log_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
@@ -506,8 +515,11 @@ impl SecureLogStore for SqliteSecureLogStore {
             .prepare("SELECT DISTINCT stream_id FROM witness_log ORDER BY stream_id")
             .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-            out.push(read_text(stmt.column_value(0))?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(read_text(stmt.column_value(0))?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
@@ -527,8 +539,11 @@ impl SecureLogStore for SqliteSecureLogStore {
                 .prepare("SELECT DISTINCT stream_id FROM witness_log")
                 .map_err(anyhow_err)?;
             let mut out = Vec::new();
-            while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-                out.push(read_text(stmt.column_value(0))?);
+            loop {
+                match stmt.step().map_err(anyhow_err)? {
+                    StepResult::Row => out.push(read_text(stmt.column_value(0))?),
+                    StepResult::Done => break,
+                }
             }
             out
         };
@@ -547,8 +562,13 @@ impl SecureLogStore for SqliteSecureLogStore {
                 stmt.bind(2, &SqliteValue::Integer(k as i64))
                     .map_err(anyhow_err)?;
                 let mut out = HashSet::new();
-                while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-                    out.insert(read_i64(stmt.column_value(0))?);
+                loop {
+                    match stmt.step().map_err(anyhow_err)? {
+                        StepResult::Row => {
+                            out.insert(read_i64(stmt.column_value(0))?);
+                        }
+                        StepResult::Done => break,
+                    }
                 }
                 out
             } else {
@@ -569,8 +589,11 @@ impl SecureLogStore for SqliteSecureLogStore {
                 stmt.bind_text_ref(1, sid).map_err(anyhow_err)?;
                 stmt.bind_text_ref(2, cutoff).map_err(anyhow_err)?;
                 let mut out = Vec::new();
-                while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-                    out.push(read_i64(stmt.column_value(0))?);
+                loop {
+                    match stmt.step().map_err(anyhow_err)? {
+                        StepResult::Row => out.push(read_i64(stmt.column_value(0))?),
+                        StepResult::Done => break,
+                    }
                 }
                 out
             } else {
@@ -579,8 +602,11 @@ impl SecureLogStore for SqliteSecureLogStore {
                     .map_err(anyhow_err)?;
                 stmt.bind_text_ref(1, sid).map_err(anyhow_err)?;
                 let mut out = Vec::new();
-                while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-                    out.push(read_i64(stmt.column_value(0))?);
+                loop {
+                    match stmt.step().map_err(anyhow_err)? {
+                        StepResult::Row => out.push(read_i64(stmt.column_value(0))?),
+                        StepResult::Done => break,
+                    }
                 }
                 out
             };
@@ -646,8 +672,11 @@ impl SecureLogStore for SqliteSecureLogStore {
         stmt.bind(3, &SqliteValue::Integer(to as i64))
             .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-            out.push(row_to_secure_log_row(&stmt)?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_secure_log_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
@@ -728,8 +757,11 @@ impl SecureLogStore for SqliteSecureLogStore {
             )
             .map_err(anyhow_err)?;
         let mut out = Vec::new();
-        while let StepResult::Row = stmt.step().map_err(anyhow_err)? {
-            out.push(row_to_stream_row(&stmt)?);
+        loop {
+            match stmt.step().map_err(anyhow_err)? {
+                StepResult::Row => out.push(row_to_stream_row(&stmt)?),
+                StepResult::Done => break,
+            }
         }
         Ok(out)
     }
@@ -817,7 +849,10 @@ fn anyhow_err(e: SqliteError) -> anyhow::Error {
 fn step_done(stmt: &mut Statement<'_>, what: &str) -> anyhow::Result<()> {
     match stmt.step().map_err(anyhow_err)? {
         StepResult::Done => Ok(()),
-        StepResult::Row => Err(anyhow::anyhow!("{} unexpectedly produced a row", what)),
+        StepResult::Row => Err(anyhow::anyhow!(
+            "{} unexpectedly produced a row",
+            what
+        )),
     }
 }
 
@@ -838,14 +873,22 @@ fn read_max_u64(stmt: &mut Statement<'_>) -> anyhow::Result<Option<u64>> {
     }
 }
 
-fn bind_opt_text(stmt: &mut Statement<'_>, idx: i32, v: Option<&str>) -> anyhow::Result<()> {
+fn bind_opt_text(
+    stmt: &mut Statement<'_>,
+    idx: i32,
+    v: Option<&str>,
+) -> anyhow::Result<()> {
     match v {
         Some(s) => stmt.bind_text_ref(idx, s).map_err(anyhow_err),
         None => stmt.bind(idx, &SqliteValue::Null).map_err(anyhow_err),
     }
 }
 
-fn bind_opt_blob(stmt: &mut Statement<'_>, idx: i32, v: Option<&[u8]>) -> anyhow::Result<()> {
+fn bind_opt_blob(
+    stmt: &mut Statement<'_>,
+    idx: i32,
+    v: Option<&[u8]>,
+) -> anyhow::Result<()> {
     match v {
         Some(b) => stmt.bind_blob_ref(idx, b).map_err(anyhow_err),
         None => stmt.bind(idx, &SqliteValue::Null).map_err(anyhow_err),
