@@ -58,8 +58,12 @@ fn genesis_entry_has_zero_prev_hash() {
 #[test]
 fn second_entry_chains_to_first() {
     let log = new_log();
-    let a = log.append("default", "a", Severity::Info, "t", b"one").unwrap();
-    let b = log.append("default", "b", Severity::Info, "t", b"two").unwrap();
+    let a = log
+        .append("default", "a", Severity::Info, "t", b"one")
+        .unwrap();
+    let b = log
+        .append("default", "b", Severity::Info, "t", b"two")
+        .unwrap();
     let entry_b = log.read(b.seqno).unwrap();
     assert_eq!(entry_b.prev_entry_hash, a.entry_hash.to_vec());
 }
@@ -84,8 +88,10 @@ fn chain_verifies_over_multiple_entries() {
 fn head_tracks_latest_seqno() {
     let log = new_log();
     assert_eq!(log.head("default").unwrap(), None);
-    log.append("default", "a", Severity::Info, "t", b"x").unwrap();
-    log.append("default", "b", Severity::Info, "t", b"y").unwrap();
+    log.append("default", "a", Severity::Info, "t", b"x")
+        .unwrap();
+    log.append("default", "b", Severity::Info, "t", b"y")
+        .unwrap();
     assert_eq!(log.head("default").unwrap(), Some(2));
 }
 
@@ -99,9 +105,15 @@ fn verify_chain_fails_on_missing_range() {
 #[test]
 fn two_streams_share_global_seqno_namespace() {
     let log = new_log();
-    let a1 = log.append("stream-a", "x", Severity::Info, "t", b"1").unwrap();
-    let b1 = log.append("stream-b", "x", Severity::Info, "t", b"2").unwrap();
-    let a2 = log.append("stream-a", "x", Severity::Info, "t", b"3").unwrap();
+    let a1 = log
+        .append("stream-a", "x", Severity::Info, "t", b"1")
+        .unwrap();
+    let b1 = log
+        .append("stream-b", "x", Severity::Info, "t", b"2")
+        .unwrap();
+    let a2 = log
+        .append("stream-a", "x", Severity::Info, "t", b"3")
+        .unwrap();
     assert_eq!(a1.seqno, 1);
     assert_eq!(b1.seqno, 2);
     assert_eq!(a2.seqno, 3);
@@ -112,9 +124,14 @@ fn two_streams_share_global_seqno_namespace() {
 #[test]
 fn per_stream_chains_link_across_global_gaps() {
     let log = new_log();
-    let a1 = log.append("stream-a", "x", Severity::Info, "t", b"one").unwrap();
-    let _b1 = log.append("stream-b", "x", Severity::Info, "t", b"mid").unwrap();
-    log.append("stream-a", "x", Severity::Info, "t", b"two").unwrap();
+    let a1 = log
+        .append("stream-a", "x", Severity::Info, "t", b"one")
+        .unwrap();
+    let _b1 = log
+        .append("stream-b", "x", Severity::Info, "t", b"mid")
+        .unwrap();
+    log.append("stream-a", "x", Severity::Info, "t", b"two")
+        .unwrap();
     let a2 = log.read(3).unwrap();
     assert_eq!(a2.stream_id, "stream-a");
     assert_eq!(a2.prev_entry_hash, a1.entry_hash.to_vec());
@@ -128,8 +145,14 @@ fn close_segment_builds_merkle_root_and_inclusion_proof_round_trips() {
 
     let log = new_log();
     for i in 0..5 {
-        log.append("default", "e", Severity::Info, "t", format!("v{}", i).as_bytes())
-            .unwrap();
+        log.append(
+            "default",
+            "e",
+            Severity::Info,
+            "t",
+            format!("v{}", i).as_bytes(),
+        )
+        .unwrap();
     }
     let seg = log.close_segment("default").unwrap();
     assert_eq!(seg.seq_start, 1);
@@ -149,11 +172,13 @@ fn close_segment_builds_merkle_root_and_inclusion_proof_round_trips() {
 fn close_segment_chains_prev_checkpoint_to_previous_checkpoint_hash() {
     let log = new_log();
     for _ in 0..3 {
-        log.append("default", "e", Severity::Info, "t", b"x").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"x")
+            .unwrap();
     }
     let seg1 = log.close_segment("default").unwrap();
     for _ in 0..3 {
-        log.append("default", "e", Severity::Info, "t", b"y").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"y")
+            .unwrap();
     }
     let seg2 = log.close_segment("default").unwrap();
     assert_eq!(seg2.seq_start, seg1.seq_end + 1);
@@ -167,7 +192,8 @@ fn close_segment_chains_prev_checkpoint_to_previous_checkpoint_hash() {
 #[test]
 fn close_empty_segment_errors() {
     let log = new_log();
-    log.append("default", "e", Severity::Info, "t", b"x").unwrap();
+    log.append("default", "e", Severity::Info, "t", b"x")
+        .unwrap();
     log.close_segment("default").unwrap();
     let err = log.close_segment("default").unwrap_err();
     assert!(matches!(err, SecureLogError::EmptySegment(_)));
@@ -177,11 +203,13 @@ fn close_empty_segment_errors() {
 fn list_segments_returns_in_order() {
     let log = new_log();
     for _ in 0..2 {
-        log.append("default", "e", Severity::Info, "t", b"x").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"x")
+            .unwrap();
     }
     let a = log.close_segment("default").unwrap();
     for _ in 0..2 {
-        log.append("default", "e", Severity::Info, "t", b"y").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"y")
+            .unwrap();
     }
     let b = log.close_segment("default").unwrap();
     let list = log.list_segments("default").unwrap();
@@ -196,14 +224,16 @@ fn sign_and_verify_checkpoint_chain_round_trips() {
     let signer = MockCheckpointSigner;
 
     for _ in 0..3 {
-        log.append("default", "e", Severity::Info, "t", b"x").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"x")
+            .unwrap();
     }
     let seg1 = log.close_segment("default").unwrap();
     log.sign_segment(&signer, "log-signer", seg1.segment_id)
         .unwrap();
 
     for _ in 0..3 {
-        log.append("default", "e", Severity::Info, "t", b"y").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"y")
+            .unwrap();
     }
     let seg2 = log.close_segment("default").unwrap();
     log.sign_segment(&signer, "log-signer", seg2.segment_id)
@@ -229,7 +259,8 @@ fn head_file_is_written_on_sign() {
     let signer = MockCheckpointSigner;
 
     for _ in 0..3 {
-        log.append("default", "e", Severity::Info, "t", b"x").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"x")
+            .unwrap();
     }
     let seg = log.close_segment("default").unwrap();
     log.sign_segment(&signer, "log-signer", seg.segment_id)
@@ -275,7 +306,8 @@ fn verify_checkpoint_chain_rejects_unsigned() {
     let log = new_log();
     let signer = MockCheckpointSigner;
     for _ in 0..2 {
-        log.append("default", "e", Severity::Info, "t", b"x").unwrap();
+        log.append("default", "e", Severity::Info, "t", b"x")
+            .unwrap();
     }
     log.close_segment("default").unwrap();
     let err = log.verify_checkpoint_chain(&signer, "default").unwrap_err();
@@ -407,7 +439,8 @@ fn protected_stream_keeps_metadata_plaintext() {
 #[test]
 fn open_payload_passes_through_plaintext_entries() {
     let log = new_log();
-    log.append("default", "e", Severity::Info, "t", b"plain").unwrap();
+    log.append("default", "e", Severity::Info, "t", b"plain")
+        .unwrap();
     let out = log.open_payload(1).unwrap();
     assert_eq!(out, b"plain");
 }
