@@ -22,14 +22,11 @@ jobs:
       # secure-log-sqlite depends on sqlink's `sqlite-component-core` via a
       # local path (`../../../sqlink/sqlite-wasm/core`), which expects sqlink
       # as a sibling checkout. actions/checkout can't place a repo outside
-      # $GITHUB_WORKSPACE, so clone it directly. `sqlite-wasm` is a git
-      # submodule inside sqlink, so recurse. Floats on sqlink's default
+      # $GITHUB_WORKSPACE, so clone it directly. Floats on sqlink's default
       # branch by design — the two repos evolve together.
       - name: Clone sqlink sibling
         working-directory: ${{ github.workspace }}/..
-        run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules \
-            https://github.com/tegmentum/sqlink.git sqlink
+        run: git clone --depth 1 https://github.com/tegmentum/sqlink.git sqlink
 
       - name: Install system dependencies
         run: |
