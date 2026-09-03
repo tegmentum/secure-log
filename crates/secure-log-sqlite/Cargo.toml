@@ -15,7 +15,16 @@ secure-log = { path = "../secure-log" }
 # secure-log-sqlite via the audit adapter) link a single copy
 # of `libsqlite3-sys` and avoid the Cargo `links = "sqlite3"`
 # uniqueness conflict against rusqlite-0.32's older 0.30 pin.
-sqlite-component-core = { path = "../../../sqlink/sqlite-wasm/core" }
+#
+# Pinned to a git rev rather than a colocated path so external
+# consumers (WCO, citadel, ...) can build against a secure-log tag
+# without needing the sqlink/sqlite-wasm sibling checkout that dev
+# workspaces have. The rev tracks sqlink's own sqlite-wasm submodule
+# so downstream sqlink users see no version drift. Local iteration
+# on sqlite-component-core is still possible via an unpublished
+# `[patch."https://github.com/tegmentum/sqlite-wasm.git"]` entry
+# in the workspace root.
+sqlite-component-core = { git = "https://github.com/tegmentum/sqlite-wasm.git", rev = "44e71feec79d27abde0b6aaa5625331d750410ea" }
 thiserror.workspace = true
 anyhow = "1"
 
