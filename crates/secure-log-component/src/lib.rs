@@ -29,6 +29,16 @@ use bindings::exports::secure_log::log::log::{
     self, AppendResult as WAppendResult, InclusionProof as WInclusionProof,
     ProofStep as WProofStep, SegmentInfo as WSegmentInfo, StreamInfo as WStreamInfo,
 };
+// `types` is a shared WIT interface used by both imported and exported
+// interfaces in `secure-log:log`. wit-bindgen materializes it once
+// under the imported side; exported interfaces (`log`, `checkpoint`)
+// re-alias `LogError` via `pub type` back to this module. We
+// construct variants from the canonical location so the alias
+// remains a passive re-export.
+use bindings::secure_log::log::types::{
+    ChainBrokenDetail as WChainBrokenDetail, InclusionMismatchDetail as WInclusionMismatchDetail,
+    LogError as WLogError,
+};
 // Imported keystore: the signing key lives in whatever provider is
 // composed in; only the handle + public key cross this boundary.
 use bindings::keys::keystore::signer as ksigner;
@@ -64,6 +74,54 @@ fn with_log<R>(f: impl FnOnce(&NativeSecureLog) -> R) -> R {
 
 fn digest_from_vec(v: Vec<u8>) -> Result<[u8; HASH_LEN], String> {
     v.try_into().map_err(|_| "hash is not 32 bytes".to_string())
+}
+
+// ---------------------------------------------------------------------
+// Error bridge — SecureLogError (core) -> LogError (WIT variant).
+//
+// One-for-one mapping. Each Rust arm produces the matching WIT arm
+// with the same payload shape. Callers wire this into every
+// `.map_err(native_err_to_wit)` at the guest/WIT boundary; the two
+// multi-field arms (`ChainBroken`, `InclusionMismatch`) construct
+// record payloads because WIT variant arms only carry one value.
+// ---------------------------------------------------------------------
+
+fn native_err_to_wit(e: secure_log::SecureLogError) -> WLogError {
+    use secure_log::SecureLogError as N;
+    match e {
+        N::EntryNotFound(seqno) => WLogError::EntryNotFound(seqno),
+        N::StreamNotFound(s) => WLogError::StreamNotFound(s),
+        N::ChainBroken { seqno, reason } => {
+            WLogError::ChainBroken(WChainBrokenDetail { seqno, reason })
+        }
+        N::InclusionMismatch { seqno, segment_id } => {
+            WLogError::InclusionMismatch(WInclusionMismatchDetail { seqno, segment_id })
+        }
+        N::SegmentNotFound(id) => WLogError::SegmentNotFound(id),
+        N::SegmentAlreadyClosed(id) => WLogError::SegmentAlreadyClosed(id),
+        N::EmptySegment(s) => WLogError::EmptySegment(s),
+        N::NotImplemented => WLogError::NotImplemented,
+        N::Storage(s) => WLogError::Storage(s),
+        N::Encoding(s) => WLogError::Encoding(s),
+        N::Invalid(s) => WLogError::Invalid(s),
+    }
+}
+
+/// Wrap a bare-string storage diagnostic (from the imported
+/// `wstore::init` / other store surfaces that predate the typed
+/// error) as a WIT `log-error::storage` variant. The imported
+/// `secure-log:log/store` interface still returns `string`; every
+/// bridge point converts through here so callers see a consistent
+/// variant surface.
+fn storage_str_to_wit(s: String) -> WLogError {
+    WLogError::Storage(s)
+}
+
+/// Wrap a bare-string caller-side diagnostic (from `digest_from_vec`
+/// / `proof_from_w` — payload-shape errors on the WIT boundary) as
+/// a WIT `log-error::invalid` variant.
+fn invalid_str_to_wit(s: String) -> WLogError {
+    WLogError::Invalid(s)
 }
 
 // ---------------------------------------------------------------------
@@ -563,8 +621,12 @@ impl encoder::Guest for Component {
 // ---------------------------------------------------------------------
 
 impl log::Guest for Component {
-    fn open(config: String) -> Result<(), String> {
-        wstore::init(&config)
+    fn open(config: String) -> Result<(), WLogError> {
+        // `wstore::init` returns `Result<(), String>` — the imported
+        // store WIT still uses bare strings. Wrap as
+        // `log-error::storage` so the WIT boundary presents a uniform
+        // variant surface even for pre-typed-error diagnostics.
+        wstore::init(&config).map_err(storage_str_to_wit)
     }
 
     fn append(
@@ -573,14 +635,14 @@ impl log::Guest for Component {
         severity: log::Severity,
         producer: String,
         payload: Vec<u8>,
-    ) -> Result<WAppendResult, String> {
+    ) -> Result<WAppendResult, WLogError> {
         let sev = log_sev_to_core(severity);
         with_log(|log| log.append(&stream_id, &event_type, sev, &producer, &payload))
             .map(|r| WAppendResult {
                 seqno: r.seqno,
                 entry_hash: r.entry_hash.to_vec(),
             })
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
     fn append_with_encoding(
@@ -590,7 +652,7 @@ impl log::Guest for Component {
         producer: String,
         payload: Vec<u8>,
         payload_encoding: String,
-    ) -> Result<WAppendResult, String> {
+    ) -> Result<WAppendResult, WLogError> {
         let sev = log_sev_to_core(severity);
         with_log(|log| {
             log.append_with_encoding(
@@ -606,28 +668,28 @@ impl log::Guest for Component {
             seqno: r.seqno,
             entry_hash: r.entry_hash.to_vec(),
         })
-        .map_err(|e| e.to_string())
+        .map_err(native_err_to_wit)
     }
 
-    fn read(seqno: u64) -> Result<WEntryFields, String> {
+    fn read(seqno: u64) -> Result<WEntryFields, WLogError> {
         with_log(|log| log.read(seqno))
             .map(entry_to_w)
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn head(stream_id: String) -> Result<Option<u64>, String> {
-        with_log(|log| log.head(&stream_id)).map_err(|e| e.to_string())
+    fn head(stream_id: String) -> Result<Option<u64>, WLogError> {
+        with_log(|log| log.head(&stream_id)).map_err(native_err_to_wit)
     }
 
-    fn verify_chain(stream_id: String, from_seqno: u64, to_seqno: u64) -> Result<(), String> {
+    fn verify_chain(stream_id: String, from_seqno: u64, to_seqno: u64) -> Result<(), WLogError> {
         with_log(|log| log.verify_chain(&stream_id, from_seqno, to_seqno))
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn close_segment(stream_id: String) -> Result<WSegmentInfo, String> {
+    fn close_segment(stream_id: String) -> Result<WSegmentInfo, WLogError> {
         with_log(|log| log.close_segment(&stream_id))
             .map(segment_info_to_w)
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
     fn list_segments(stream_id: String) -> Vec<WSegmentInfo> {
@@ -636,44 +698,48 @@ impl log::Guest for Component {
             .unwrap_or_default()
     }
 
-    fn read_segment(segment_id: u64) -> Result<WSegmentInfo, String> {
+    fn read_segment(segment_id: u64) -> Result<WSegmentInfo, WLogError> {
         with_log(|log| log.read_segment(segment_id))
             .map(segment_info_to_w)
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn build_inclusion_proof(seqno: u64) -> Result<WInclusionProof, String> {
+    fn build_inclusion_proof(seqno: u64) -> Result<WInclusionProof, WLogError> {
         with_log(|log| log.inclusion_proof(seqno))
             .map(proof_to_w)
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
     fn verify_inclusion_proof(
         proof: WInclusionProof,
         expected_root: Vec<u8>,
-    ) -> Result<(), String> {
-        let core_proof = proof_from_w(proof)?;
-        let root = digest_from_vec(expected_root)?;
-        secure_log::verify_inclusion_proof(&core_proof, &root).map_err(|e| e.to_string())
+    ) -> Result<(), WLogError> {
+        // proof_from_w / digest_from_vec surface shape errors on the
+        // WIT boundary as bare strings — wrap those as
+        // `log-error::invalid`. The verification itself returns a
+        // typed SecureLogError, routed through the standard bridge.
+        let core_proof = proof_from_w(proof).map_err(invalid_str_to_wit)?;
+        let root = digest_from_vec(expected_root).map_err(invalid_str_to_wit)?;
+        secure_log::verify_inclusion_proof(&core_proof, &root).map_err(native_err_to_wit)
     }
 
     fn create_stream(
         stream_id: String,
         tier: String,
         description: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), WLogError> {
         with_log(|log| log.create_stream(&stream_id, &tier, description.as_deref()))
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn list_streams() -> Result<Vec<WStreamInfo>, String> {
+    fn list_streams() -> Result<Vec<WStreamInfo>, WLogError> {
         with_log(|log| log.list_streams())
             .map(|v| v.into_iter().map(stream_info_to_w).collect())
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn deprecate_stream(stream_id: String) -> Result<(), String> {
-        with_log(|log| log.deprecate_stream(&stream_id)).map_err(|e| e.to_string())
+    fn deprecate_stream(stream_id: String) -> Result<(), WLogError> {
+        with_log(|log| log.deprecate_stream(&stream_id)).map_err(native_err_to_wit)
     }
 }
 
@@ -834,22 +900,22 @@ fn verify_rsa_pss_sha256(
 // ---------------------------------------------------------------------
 
 impl checkpoint::Guest for Component {
-    fn sign_segment(identity: String, segment_id: u64) -> Result<(Vec<u8>, Vec<u8>), String> {
+    fn sign_segment(identity: String, segment_id: u64) -> Result<(Vec<u8>, Vec<u8>), WLogError> {
         with_log(|log| log.sign_segment(&ComponentSigner, &identity, segment_id))
             .map(|(hash, sig)| (hash.to_vec(), sig))
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn verify_segment_signature(segment_id: u64) -> Result<Vec<u8>, String> {
+    fn verify_segment_signature(segment_id: u64) -> Result<Vec<u8>, WLogError> {
         with_log(|log| log.verify_segment_signature(&ComponentSigner, segment_id))
             .map(|hash| hash.to_vec())
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 
-    fn verify_checkpoint_chain(stream_id: String) -> Result<u32, String> {
+    fn verify_checkpoint_chain(stream_id: String) -> Result<u32, WLogError> {
         with_log(|log| log.verify_checkpoint_chain(&ComponentSigner, &stream_id))
             .map(|n| n as u32)
-            .map_err(|e| e.to_string())
+            .map_err(native_err_to_wit)
     }
 }
 
