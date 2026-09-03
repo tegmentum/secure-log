@@ -24,7 +24,7 @@ secure-log = { path = "../secure-log" }
 # on sqlite-component-core is still possible via an unpublished
 # `[patch."https://github.com/tegmentum/sqlite-wasm.git"]` entry
 # in the workspace root.
-sqlite-component-core = { git = "https://github.com/tegmentum/sqlite-wasm.git", rev = "44e71feec79d27abde0b6aaa5625331d750410ea" }
+sqlite-component-core = { git = "https://github.com/tegmentum/sqlite-wasm.git", tag = "v0.1.0" }
 thiserror.workspace = true
 anyhow = "1"
 

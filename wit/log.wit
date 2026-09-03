@@ -24,65 +24,6 @@
 package secure-log:log@0.1.0;
 
 // ---------------------------------------------------------------------
-// Structured error surface.
-//
-// Every function on `log`, `encoder`, `checkpoint` returns
-// `result<T, log-error>`. The variant mirrors the Rust
-// `secure_log::SecureLogError` enum 1:1 so downstream consumers can
-// pattern-match on structured errors instead of substring-matching on
-// bare-string diagnostics. `chain-broken` and `inclusion-mismatch` carry
-// their multi-field payloads via record types (WIT variant arms hold at
-// most one payload) so field names + types remain self-documenting.
-// ---------------------------------------------------------------------
-interface types {
-    // Payload for `log-error::chain-broken`. Names the seqno where the
-    // chain link failed and a human-readable reason for the break.
-    record chain-broken-detail {
-        seqno:  u64,
-        reason: string,
-    }
-
-    // Payload for `log-error::inclusion-mismatch`. Names the seqno whose
-    // proof failed to reconstruct the expected Merkle root, and the
-    // segment id the proof targeted.
-    record inclusion-mismatch-detail {
-        seqno:      u64,
-        segment-id: u64,
-    }
-
-    // Structured error surface returned by every secure-log:log method.
-    // Mirrors `secure_log::SecureLogError` in the Rust core crate.
-    variant log-error {
-        // No entry exists at the given seqno.
-        entry-not-found(u64),
-        // The named stream does not exist in the backing store.
-        stream-not-found(string),
-        // A hash-chain link failed to verify. See detail for the seqno
-        // and reason.
-        chain-broken(chain-broken-detail),
-        // An inclusion proof did not reconstruct the expected root. See
-        // detail for the offending seqno and segment id.
-        inclusion-mismatch(inclusion-mismatch-detail),
-        // No segment exists at the given segment id.
-        segment-not-found(u64),
-        // The named segment is already closed; re-close is rejected.
-        segment-already-closed(u64),
-        // `close-segment` refused because nothing has been appended
-        // since the previous close for the named stream.
-        empty-segment(string),
-        // The operation is not implemented in this backend.
-        not-implemented,
-        // The underlying storage layer surfaced a diagnostic.
-        storage(string),
-        // The canonical encoder surfaced a diagnostic.
-        encoding(string),
-        // Caller-side input was malformed (bad severity, wrong hash
-        // length, unknown tier, ...).
-        invalid(string),
-    }
-}
-
-// ---------------------------------------------------------------------
 // Pluggable canonical encoder.
 // ---------------------------------------------------------------------
 interface encoder {
@@ -166,13 +107,12 @@ interface encoder {
 // ---------------------------------------------------------------------
 interface log {
     use encoder.{entry-fields, checkpoint-fields, severity};
-    use types.{log-error};
 
     // Open / configure the backing store. MUST be called once before
     // any other method. `config` is forwarded verbatim to the store
     // backend (see `store.init` for the per-backend format). There is
     // no implicit default — an empty config is an error.
-    open: func(config: string) -> result<_, log-error>;
+    open: func(config: string) -> result<_, string>;
 
     // Metadata describing a successfully appended entry.
     record append-result {
@@ -239,7 +179,7 @@ interface log {
         severity:     severity,
         producer:     string,
         payload:      list<u8>,
-    ) -> result<append-result, log-error>;
+    ) -> result<append-result, string>;
 
     // Append with an explicit `payload-encoding` override — the
     // stamped tag lands verbatim in the sealed row (and is hashed
@@ -264,13 +204,13 @@ interface log {
         producer:         string,
         payload:          list<u8>,
         payload-encoding: string,
-    ) -> result<append-result, log-error>;
+    ) -> result<append-result, string>;
 
     // Read a single entry by sequence number.
-    read: func(seqno: u64) -> result<entry-fields, log-error>;
+    read: func(seqno: u64) -> result<entry-fields, string>;
 
     // Return the highest seqno in the given stream, or none if empty.
-    head: func(stream-id: string) -> result<option<u64>, log-error>;
+    head: func(stream-id: string) -> result<option<u64>, string>;
 
     // Walk the hash chain between two sequence numbers (inclusive) and
     // verify every link. Returns ok(_) if the chain is intact, err(_)
@@ -279,26 +219,26 @@ interface log {
         stream-id:  string,
         from-seqno: u64,
         to-seqno:   u64,
-    ) -> result<_, log-error>;
+    ) -> result<_, string>;
 
     // Close the current open segment for the given stream, building
     // the Merkle root over all entries since the last close.
-    close-segment: func(stream-id: string) -> result<segment-info, log-error>;
+    close-segment: func(stream-id: string) -> result<segment-info, string>;
 
     // List all closed segments for the given stream.
     list-segments: func(stream-id: string) -> list<segment-info>;
 
     // Read a single segment by id.
-    read-segment: func(segment-id: u64) -> result<segment-info, log-error>;
+    read-segment: func(segment-id: u64) -> result<segment-info, string>;
 
     // Build an inclusion proof for a seqno in its segment's Merkle tree.
-    build-inclusion-proof: func(seqno: u64) -> result<inclusion-proof, log-error>;
+    build-inclusion-proof: func(seqno: u64) -> result<inclusion-proof, string>;
 
     // Verify a standalone inclusion proof against an expected root.
     verify-inclusion-proof: func(
         proof:         inclusion-proof,
         expected-root: list<u8>,
-    ) -> result<_, log-error>;
+    ) -> result<_, string>;
 
     // Create or update a stream's metadata (tier + description).
     //
@@ -317,7 +257,7 @@ interface log {
         stream-id:   string,
         tier:        string,
         description: option<string>,
-    ) -> result<_, log-error>;
+    ) -> result<_, string>;
 
     // Enumerate every stream known to the backend, including
     // deprecated ones. Callers isolate live vs archived by filtering
@@ -329,7 +269,7 @@ interface log {
     // streams return the empty list — safest fallback so callers can
     // treat "no streams" and "stream tracking unsupported"
     // identically.
-    list-streams: func() -> result<list<stream-info>, log-error>;
+    list-streams: func() -> result<list<stream-info>, string>;
 
     // Soft-delete a stream: subsequent `append` calls against it are
     // rejected with `err("stream '...' is deprecated ...")`. Existing
@@ -340,7 +280,7 @@ interface log {
     // The deprecation timestamp is stamped by the backend at call
     // time. Backends that don't track stream metadata return
     // `err("stream lifecycle not supported")`.
-    deprecate-stream: func(stream-id: string) -> result<_, log-error>;
+    deprecate-stream: func(stream-id: string) -> result<_, string>;
 }
 
 // ---------------------------------------------------------------------
@@ -355,21 +295,19 @@ interface log {
 // unaffected.
 // ---------------------------------------------------------------------
 interface checkpoint {
-    use types.{log-error};
-
     // Sign the checkpoint of a closed segment using the keystore key
     // bound to `identity`, and persist the signature on the segment.
     // Returns (checkpoint-hash, signature).
     sign-segment: func(identity: string, segment-id: u64)
-        -> result<tuple<list<u8>, list<u8>>, log-error>;
+        -> result<tuple<list<u8>, list<u8>>, string>;
 
     // Verify one closed segment's stored signature against its
     // recomputed checkpoint hash. Returns the checkpoint hash.
-    verify-segment-signature: func(segment-id: u64) -> result<list<u8>, log-error>;
+    verify-segment-signature: func(segment-id: u64) -> result<list<u8>, string>;
 
     // Verify a stream's whole checkpoint chain from genesis to head.
     // Returns the number of signed segments walked.
-    verify-checkpoint-chain: func(stream-id: string) -> result<u32, log-error>;
+    verify-checkpoint-chain: func(stream-id: string) -> result<u32, string>;
 }
 
 // ---------------------------------------------------------------------
@@ -377,7 +315,6 @@ interface checkpoint {
 // drop-in replacement for the native Rust backend.
 // ---------------------------------------------------------------------
 world secure-log-host {
-    export types;
     export encoder;
     export log;
     export checkpoint;
